@@ -1,3 +1,9 @@
+"""
+DATEI: google_books.py
+PROJEKT: MyBook-Management (v1.2.0)
+BESCHREIBUNG: Kümmert sich um den API Zugriff auf Google-Books mit ISBN (aus epub).
+              Liest Rating, Rating-count und Description.
+"""
 import requests
 import re
 from typing import Optional, Dict, Any, List
@@ -54,7 +60,7 @@ def _query_google_books(query: str, max_results: int = 1, lang: Optional[str] = 
 def get_book_data_by_isbn(isbn: str) -> Dict[str, Any]:
     """
     Ruft alle verfügbaren Metadaten von Google Books anhand der ISBN ab
-    und gibt ein BookMetadata-konformes Dictionary zurück.
+    und gibt ein BookData-konformes Dictionary zurück.
     """
     if not isbn:
         return {}
@@ -75,7 +81,7 @@ def get_book_data_by_isbn(isbn: str) -> Dict[str, Any]:
 
     published_date = volume_info.get('publishedDate')
 
-    # Mapping auf BookMetadata-Keys
+    # Mapping auf BookData-Keys
     metadata = {
         # Ratings
         'average_rating': volume_info.get('averageRating'),

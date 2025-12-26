@@ -1,9 +1,23 @@
+"""
+DATEI: read_epub.py
+PROJEKT: MyBook-Management (v1.2.0)
+BESCHREIBUNG: Kümmert sich um das Auslesen von epub-Dateien
+             Verwendet jetzt das BookData Model, dabei wird id= 0 und is_read = 0 gesetzt.
+             Dies muss beim Speichern beachtet, bzw. ignoriert werden!
+"""
 import zipfile
 import xml.etree.ElementTree as ET
 import os
 import re
 import tempfile
+import html # Oben zu den Imports
 from typing import Optional, List, Tuple, Dict, Any
+
+try:
+    from book_data_model import BookData
+except ImportError:
+    # Falls das Modul beim Standalone-Test nicht gefunden wird
+    BookData = None
 
 # Dublin Core und OPF Namespaces für XML-Parsing
 NS_DC = {'dc': 'http://purl.org/dc/elements/1.1/'}
@@ -36,6 +50,19 @@ def _get_opf_root(zf, epub_path):
         # Fehler beim Lesen oder Parsen
         return None, None
 
+
+def clean_html(raw_html):
+    if not raw_html: return ""
+    # 1. HTML-Entities auflösen (z.B. &#8212; zu —)
+    clean = html.unescape(raw_html)
+    # 2. Ersetze Block-Elemente durch Zeilenumbrüche
+    clean = re.sub(r'<(div|p|br|li|h1|h2)[^>]*>', '\n', clean)
+    # 3. Alle restlichen HTML-Tags entfernen
+    clean = re.sub(r'<[^>]+>', '', clean)
+    # 4. Whitespace-Kosmetik
+    clean = re.sub(r'[ \t]+', ' ', clean) # Tabulatoren/Doppel-Leerzeichen weg
+    clean = re.sub(r'\n\s*\n+', '\n\n', clean).strip() # Max 2 Umbrüche
+    return clean
 
 def _get_dc_element(opf_root, tag_name):
     """Extrahiert den Text eines einzelnen Dublin Core Elements."""
@@ -181,7 +208,7 @@ def _split_title_series(full_title):
 def get_epub_metadata(epub_file_path) -> Dict[str, Any]:
     """
     Extrahiert alle priorisierten Metadaten aus einem EPUB und gibt sie
-    in einem Dictionary gemäß dem finalen Schema der BookMetadata-Klasse zurück.
+    in einem Dictionary gemäß dem finalen Schema der BookData-Klasse zurück.
     """
     try:
         with zipfile.ZipFile(epub_file_path, 'r') as zf:
@@ -192,23 +219,16 @@ def get_epub_metadata(epub_file_path) -> Dict[str, Any]:
 
             # --- Metadaten-Rohdaten einlesen ---
             raw_title = _get_dc_element(opf_root, 'title')
-
-            # ATTRIBUT NAME: description (korrigiert)
-            book_description = _get_dc_element(opf_root, 'description')
-
+            raw_description = _get_dc_element(opf_root, 'description')
+            book_description = clean_html(raw_description) if raw_description else ""
             raw_authors = _get_all_dc_elements(opf_root, 'creator')
-
-            # ATTRIBUT NAME: keywords
             keywords_epub = _get_all_dc_elements(opf_root, 'subject')
-
             raw_identifier = _get_dc_element(opf_root, 'identifier')
             raw_language = _get_dc_element(opf_root, 'language')
 
             # --- Cover-Pfad finden und BILD EXTRAHIEREN ---
             internal_cover_path = _get_cover_image_relative_path(opf_root, opf_path)
-
-            # ATTRIBUT NAME: temp_image_path (korrigiert)
-            temp_image_path = _extract_and_save_cover(zf, internal_cover_path)
+            image_path = _extract_and_save_cover(zf, internal_cover_path)
 
             # --- 1. Autoren-Normalisierung ---
             normalized_authors = []
@@ -225,41 +245,25 @@ def get_epub_metadata(epub_file_path) -> Dict[str, Any]:
             # ISBN-Extraktion
             isbn = raw_identifier.split(':')[-1] if raw_identifier and ':' in raw_identifier else raw_identifier
 
-            # --- FINAL: Dictionary MAPPING AUF BOOKMETADATA-SCHLÜSSEL ---
-            metadata = {
-                # A. KRITISCHE DATEN & DATEI-INFOS
-                'file_path': epub_file_path,
-                'title': title,
+            # --- 3. Erstellung des BookData-Objekts (Wurzel-Korrektur) ---
+            # Wenn BookData verfügbar ist, geben wir ein Objekt zurück, sonst ein sauberes Dict
+            data_content = {
+                'path': epub_file_path,  # Geändert von file_path auf path
+                'title': title or "Unbekannter Titel",
                 'authors': normalized_authors,
-
-                # B. KERN-METADATEN
                 'isbn': isbn,
                 'year': _get_dc_element(opf_root, 'date')[:4] if _get_dc_element(opf_root, 'date') else None,
                 'language': raw_language,
                 'series_name': series_name,
                 'series_number': series_number,
-
-                # C. INHALTLICHE DATEN
-                'description': book_description,  # <<< KORREKTER NAME
+                'description': book_description,
                 'keywords': keywords_epub,
-
-                # D. EXTERN GELESENE RATING-DATEN / TEMPORÄRE DATEN
-                'temp_image_path': temp_image_path,  # <<< KORREKTER NAME
-
-                # Setze die restlichen BookMetadata-Felder auf None/Standardwerte,
-                # damit BookMetadata.from_dict keine leeren/fehlenden Keys hat,
-                # falls die Standardwerte der Klasse nicht gezogen werden:
-                'genre': None,
-                'region': None,
-                'notes': None,
-                'stars': None,
-                'is_read': 0,
-                'is_complete': 0,
-                'average_rating': None,
-                'ratings_count': None,
+                'image_path': image_path,  # Mapping auf Attributname in BookData
+                'is_read': 0
             }
+            # --- FINAL: Dictionary MAPPING AUF BOOKMETADATA-SCHLÜSSEL ---
+            return BookData(**data_content)
 
-            return metadata
 
     except zipfile.BadZipFile:
         print(f"FEHLER: '{epub_file_path}' ist keine gültige Zip-Datei (EPUB).")

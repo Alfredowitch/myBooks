@@ -1,64 +1,73 @@
-import os
+"""
+DATEI: book_scanner.py
+PROJEKT: MyBook-Management (v1.2.0)
+BESCHREIBUNG: Scannt E-Book-Dateien, extrahiert Metadaten, fragt APIs ab
+              und setzt einen Versionsstempel für die Datenqualität.
+"""
 
-# IMPORTIEREN DER FUNKTIONEN AUS DEINEN NEUEN MODULEN
-# --- Importiere vorhandene Funktionen ---
+import os
+import sys
+import re
+import html
+from typing import List
+
+# IMPORTIEREN DER FUNKTIONEN AUS DEINEN MODULEN
+MODULES_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'Gemini'))
+sys.path.append(MODULES_DIR)
+
 try:
-    # Passe diese Importe an deine tatsächlichen Modulnamen an
-    # Füge google_books hinzu!
-    from read_db_ebooks import get_db_metadata, search_books, get_first_book_entry
-    from save_db_ebooks import save_book_with_authors, delete_book_from_db
+    from read_db_ebooks import get_db_metadata, search_books
+    from save_db_ebooks import save_book_with_authors
     from read_file import extract_info_from_filename, derive_metadata_from_path
     from read_epub import get_epub_metadata
     from check import check_for_mismatch
     from read_pdf import get_book_cover
-    from google_books import get_book_data_by_isbn  # <<< NEU: Für API-Daten
-    from googleBooks import read_google_books
-    from openLibrary import read_open_library
+
+    # API Tools
+    from google_books import get_book_data_by_isbn, search_isbn_only
+    from open_library import fetch_open_library_data
+
+    # Mappings & Models
     from regionMapping import determine_region
     from genreMapping import determine_single_genre
-    from book_data_model import BookMetadata
+    from book_data_model import BookData
 except ImportError as e:
-    # Kritischer Fehler: Zeige eine Meldung und beende das Programm
     print(f"Fehler beim Modul-Import. Bitte Dateinamen prüfen: {e}")
-    # messagebox.showerror("Importfehler", f"Wichtige Module fehlen. App kann nicht starten: {e}")
-    # sys.exit(1)
 
-
-# --- GLOBALE VARIABLEN ---
-# Hinweis: Du musst DB_PATH und die Funktionen aus den Modulen importieren
+# --- KONSTRUKTION ---
 DB_PATH = r'M://books.db'
-mismatch_list = []  # Liste für problematische Dateien
+CURRENT_SCANNER_VERSION = "1.2.0"  # Dein neuer Versionsstempel
+mismatch_list = []
 
 
 def format_authors_for_display(normalized_authors):
-    # ... (Code, der die Autoren nach Nachnamen sortiert) ...
+    if not normalized_authors: return ""
     sorted_authors = sorted(normalized_authors, key=lambda x: x[1])
-
-    author_strings = []
-    # ... (Schleife, die 'Nachname Vorname' erzeugt) ...
-    for firstname, lastname in sorted_authors:
-        formatted_name = f"{lastname} {firstname}".strip()
-        if formatted_name:
-            author_strings.append(formatted_name)
-
-    # 🚨 Wichtig: Verwendung von ' & ' als Trennzeichen
+    author_strings = [f"{lastname} {firstname}".strip() for firstname, lastname in sorted_authors]
     return " & ".join(author_strings)
 
-# --- DEINE FUNKTIONEN HIER EINFÜGEN (für diesen Kontext) ---
-# Hier füge ich die neu entwickelten Funktionen (check_db_for_isbn, etc.) nur als Platzhalter ein.
-# In deinem finalen Skript musst du sie als Imports verwenden!
-# ... (Hier die Platzhalter für check_db_for_isbn, extract_metadata_from_filename, etc.) ...
-# ... (Hier die neuen Mapping-Funktionen, da sie für die Konsolidierung benötigt werden) ...
-# FÜGE HIER DIE FUNKTIONEN determine_single_genre und determine_region EIN
-# ...
 
-def scan_ebooks(base, sp=None, genre=None, region=None, series=None):
+def clean_description(text):
+    if not text:
+        return ""
+    # 1. HTML-Entities umwandeln (&lt; -> <, &nbsp; -> Leerzeichen)
+    text = html.unescape(text)
+    # 2. Block-Elemente durch Zeilenumbrüche ersetzen (bevor sie gelöscht werden)
+    # Erwischt auch Tags mit Attributen wie <p class="description">
+    text = re.sub(r'<(div|p|br|li|h[1-6])[^>]*>', '\n', text, flags=re.IGNORECASE)
+    # 3. Alle verbleibenden Tags restlos entfernen
+    text = re.sub(r'<[^>]+>', '', text)
+    # 4. Whitespace-Kosmetik
+    # Verhindert, dass 10 Leerzeilen entstehen, falls viele <p> hintereinander waren
+    text = re.sub(r'\n\s*\n+', '\n\n', text)
+
+    return text.strip()
+
+
+def scan_ebooks(base):
     """
-    Scannt E-Book-Dateien, extrahiert Metadaten, fragt APIs ab (nur bei fehlenden Daten)
-    und speichert alles in der Datenbank.
+    Scannt E-Book-Dateien und reichert sie mit API-Daten an.
     """
-
-
     for root, dirs, files in os.walk(base):
         for file in files:
             file_path = os.path.join(root, file)
@@ -66,59 +75,52 @@ def scan_ebooks(base, sp=None, genre=None, region=None, series=None):
             if not file.endswith(('.epub', '.pdf', '.mobi')):
                 continue
 
-            print("----------------------")
-            print(f"Verarbeite: {file}")
-            
-            # --- SCHRITT A: DB PRÜFUNG (READ_DB) ---
-            # get_db_metadata ist die neue, saubere Funktion (ersetzt check_db_for_isbn)
+            print("\n" + "=" * 40)
+            print(f"VERARBEITE: {file}")
+
+            # --- SCHRITT A: DB PRÜFUNG ---
             db_data_dict = get_db_metadata(file_path, db_path=DB_PATH)
 
-            if db_data_dict and db_data_dict.get('is_complete'):
-                print("INFO: Buch in DB als komplett markiert. Überspringe.")
+            # Optimierung: Wir scannen neu, wenn Version < 1.1.0 oder unvollständig
+            existing_version = db_data_dict.get('scanner_version') if db_data_dict else None
+
+            if db_data_dict and db_data_dict.get('is_complete') and existing_version == CURRENT_SCANNER_VERSION:
+                print(f"INFO: Bereits mit {CURRENT_SCANNER_VERSION} erfasst. Überspringe.")
                 continue
 
-            # INITIALISIERE DAS OBJEKT STATT EINEM DICT
-            # Wir nutzen from_dict, um vorhandene DB-Daten (falls da) direkt zu laden
+            # Initialisiere Objekt
             if db_data_dict:
-                book_metadata = BookMetadata.from_dict(db_data_dict)
+                book_data = BookData.from_dict(db_data_dict)
             else:
-                book_metadata = BookMetadata()
-                book_metadata.file_path = file_path
+                book_data = BookData()
+                book_data.file_path = file_path
 
-            # --- SCHRITT B: DATEINAMEN-EXTRAKTION (READ_FILE) ---
+            # Setze den aktuellen Scanner-Versionsstempel
+            book_data.scanner_version = CURRENT_SCANNER_VERSION
 
-            # Initialisiere der anderen Buch-Informationen aus dem Dateinamen
-            file_info = extract_info_from_filename(file_path)  # Nutze die neue, korrekte Funktion
-            # Wir erstellen ein temporäres Buch-Objekt für die Dateinamen-Daten und mergen es
-            file_metadata = BookMetadata.from_dict(file_info)
-            # aus dem Pfad holen wir die Sprache, Region, Genre und Keywords aus Business-Unterordner
+            # --- SCHRITT B: DATEINAME & PFAD ---
+            # Info vom Pfad
             lang, reg, gen, path_keywords = derive_metadata_from_path(file_path)
-            # Manuelle Pfad-Daten ergänzen
-            if lang:
-                book_metadata.language = lang
-            if gen:
-                book_metadata.genre = gen
-            if reg:
-                book_metadata.region = reg
+            book_data.language = lang or book_data.language
+            book_data.genre = gen or book_data.genre
+            book_data.region = reg or book_data.region
             if path_keywords:
-                if not book_metadata.keywords:
-                    book_metadata.keywords = []
-                for kw in path_keywords:  # Verhindert Dubletten
-                    if kw not in book_metadata.keywords:
-                        book_metadata.keywords.append(kw)
+                book_data.keywords = list(set((book_data.keywords or []) + path_keywords))
+            # Info vom Filenamen
+            file_info = extract_info_from_filename(file_path)
+            file_metadata = BookData.from_dict(file_info)
+            book_data.merge_with(file_metadata)
 
+            if book_data.description and getattr(book_data, 'is_manual_description', 0) == 0:
+                book_data.description = clean_description(book_data.description)
 
-            # Merge: Dateiname hat hohe Priorität für Titel/Autor
-            book_metadata.merge_with(file_metadata)
-
-
-            # --- SCHRITT C: EPUB-METADATEN (READ_EPUB) ---
+            # --- SCHRITT C: EPUB-METADATEN ---
             if file.endswith('.epub'):
                 try:
                     epub_raw = get_epub_metadata(file_path)
-                    epub_metadata = BookMetadata.from_dict(epub_raw)
+                    epub_metadata = BookData.from_dict(epub_raw)
 
-                    # Mismatch Check (bevor wir mergen)
+                    # Mismatch Check
                     mismatch_entry = check_for_mismatch(
                         file_path=file_path,
                         file_title=file_info.get('title'),
@@ -129,93 +131,98 @@ def scan_ebooks(base, sp=None, genre=None, region=None, series=None):
                     if mismatch_entry:
                         mismatch_list.append(mismatch_entry)
 
-                        # Jetzt die EPUB-Daten einpflegen
-                    book_metadata.merge_with(epub_metadata)
+                    book_data.merge_with(epub_metadata)
                 except Exception as e:
                     print(f"Fehler beim EPUB-Lesen: {e}")
 
+            # --- SCHRITT D: API-LOGIK (DER "VERSTAND") ---
+            # 1. ISBN-Suche falls nötig
+            if not book_data.isbn:
+                last_name = book_data.authors[0][1] if book_data.authors else ""
+                found_isbn = search_isbn_only(book_data.title, last_name, lang=book_data.language)
+                if found_isbn:
+                    book_data.isbn = found_isbn
+                    print(f"  -> ISBN gefunden: {found_isbn}")
 
-            # --- SCHRITT D: API-SCAN (READ_GOOGLE_BOOKS, READ_OPEN_LIBRARY) ---
-            # Wir prüfen die Attribute direkt am Objekt
-            is_api_scan_needed = (book_metadata.ratings_count is None or
-                                  book_metadata.description is None or
-                                  book_metadata.isbn is None)
+            # 2. Google Books Details mit ISBN
+            if book_data.isbn:
+                api_data = get_book_data_by_isbn(book_data.isbn)
 
-            if is_api_scan_needed:
-                read_google_books(book_metadata, language=book_metadata.language)
-                read_open_library(book_metadata)
+                # Ratings & Jahr (immer aktualisieren/ergänzen)
+                book_data.average_rating = api_data.get('average_rating') or book_data.average_rating
+                book_data.ratings_count = api_data.get('ratings_count') or book_data.ratings_count
+                book_data.year = api_data.get('year') or book_data.year
+                print(f"  -> Rating von GoogleBooks gefunden: {book_data.average_rating}")
 
-            # --- SCHRITT E: DATEN-KONSOLIDIERUNG UND MAPPING ---
-            # 1. Region-Mapping (Nur, wenn keine manuelle Region gesetzt wurde)
-            if not book_metadata.region:
-                book_metadata.region = determine_region(
-                    getattr(book_metadata, 'categories', []),
-                    book_metadata.description or ""
-                )
-            # 2. Genre-Konsolidierung (Das Genre, das in der DB gespeichert wird)
-            if not book_metadata.genre:
-                book_metadata.genre = determine_single_genre(
-                    [getattr(book_metadata, 'genre_epub', None)],
-                    getattr(book_metadata, 'categories', []),
-                    book_metadata.description or ""
-                )
+                # Beschreibung (Smart Merge)
+                new_desc = api_data.get('description')
+                clean_desc = clean_description(new_desc)
+                if new_desc and getattr(book_data, 'is_manual_description', 0) == 0:
+                    book_data.description = clean_desc
 
-            # --- SCHRITT F: DATENBANK-SPEICHERUNG ---
+            # 3. OpenLibrary als Fallback für Beschreibung
+            ol_data = fetch_open_library_data(book_data.title, book_data.authors, book_data.isbn)
+            if ol_data:
+                # 1. ISBN ergänzen, falls wir vorher keine hatten
+                if not book_data.isbn and ol_data.get('ol_isbn'):
+                    book_data.isbn = ol_data['ol_isbn']
+                    print(f"  -> ISBN gefunden mit OpenLibrary: {found_isbn}")
+                # 2. Ratings IMMER übernehmen (Zusatzinfo)
+                book_data.rating_ol = ol_data.get('ol_rating', 0.0)
+                print(f"  -> Rating von OpenLibrary: {book_data.rating_ol}")
+                book_data.ratings_count_ol = ol_data.get('ol_count', 0)
+                # 3. Description von Google bleibt, aber wir notieren dann Open Library in Notizen
+                if clean_desc:
+                    # Fall A: Google hat schon eine Description geliefert
+                    if book_data.description or getattr(book_data, 'is_manual_description', 0) == 1:
+                        # NUR ergänzen, wenn der Text nicht schon in den Notizen steht
+                        current_notes = book_data.notes or ""
+                        # Wir prüfen auf die ersten 100 Zeichen, um Duplikate zu vermeiden
+                        if clean_desc[:100] not in current_notes:
+                            header = "--- API ERGÄNZUNG (OpenLibrary) ---"
+                            book_data.notes = f"{current_notes}\n\n{header}\n{clean_desc}".strip()
+                    # Fall B: Google war leer, also wird OL die Haupt-Description
+                    elif getattr(book_data, 'is_manual_description', 0) == 0:
+                        book_data.description = clean_desc
+
+            # --- SCHRITT E: MAPPING ---
+            if not book_data.region:
+                book_data.region = determine_region(getattr(book_data, 'categories', []),
+                                                        book_data.description or "")
+            if not book_data.genre:
+                book_data.genre = determine_single_genre([getattr(book_data, 'genre_epub', None)],
+                                                             getattr(book_data, 'categories', []),
+                                                             book_data.description or "") or "Unbekannt"
+
+            # --- SCHRITT G: SPEICHERN ---
             try:
-                # JETZT ÜBERGEBEN WIR DAS OBJEKT -> Fehler behoben!
-                save_book_with_authors(book_metadata, db_path=DB_PATH)
-                print(f"Gespeichert: {book_metadata.title}")
+                save_book_with_authors(book_data, db_path=DB_PATH)
+                print(f"✓ Gespeichert [v{CURRENT_SCANNER_VERSION}]: {book_data.title}")
             except Exception as e:
-                print(f"Fehler beim Speichern in DB: {e}")
+                print(f"❌ Fehler beim Speichern: {e}")
 
-    # ... (Rest der Funktion für den Mismatch-Report) ...
-    print("\nAlle Prüfschritte abgeschlossen.")
-
-
-    # Ausgabe der Liste von Dateien mit Problemen
+    # --- REPORTING ---
     if mismatch_list:
-        print("-" * 40)
-        print("🚨 Metadaten-Diskrepanzen gefunden (Report.txt erstellt) 🚨")
-
-        # Definiere den Pfad zur Report-Datei
         report_path = os.path.join(base, 'Metadaten_Report.txt')
-        print(report_path)
-
         with open(report_path, 'w', encoding="utf-8") as f:
             for item in mismatch_list:
-                f.write("-" * 50 + "\n")
+                # Wir nutzen jetzt den im Dictionary gespeicherten Pfad
+                f.write(f"Pfad: {item['full_path']}\n")
                 f.write(f"Datei: {item['filename']}\n")
 
-                # 🚨 KORREKTUR DER AUTORENPRÜFUNG 🚨
-                # Wir prüfen, ob der Schlüssel 'file_author' im Report-Item existiert.
-                if 'file_author' in item and 'epub_author' in item:
-                    # Wenn die Schlüssel existieren, wenden wir die Formatierung an.
-                    # Die Formatierung (format_authors_for_display) muss natürlich auch in
-                    # diesem Modul verfügbar sein (importiert oder definiert).
-                    file_display = format_authors_for_display(item['file_author'])
-                    epub_display = format_authors_for_display(item['epub_author'])
+                if 'file_author' in item:
+                    # Hier nutzen wir das & Format für die Anzeige im Report
+                    f_auth = format_authors_for_display(item['file_author'])
+                    e_auth = format_authors_for_display(item['epub_author'])
+                    f.write(f" ❌ Autor: {f_auth} vs. {e_auth}\n")
 
-                    f.write(f"  ❌ Autor: Dateiname '{file_display}' vs. EPUB '{epub_display}'\n")
-
-                # Titelprüfung (bleibt unverändert, da diese Felder immer zusammen existieren)
+                # (Optional) Titel-Mismatch mitschreiben
                 if 'file_title' in item:
-                    f.write(f"  ❌ Titel: Dateiname '{item['file_title']}' vs. EPUB '{item['epub_title']}'\n")
+                    f.write(f" ❌ Titel: {item['file_title']} vs. {item['epub_title']}\n")
 
-        print(f"Details wurden in '{report_path}' gespeichert.")
-
-    else:
-        print("\nAlle geprüften Autoren/Titel stimmen überein oder EPUB-Daten fehlen.")
-
-    print("-" * 40)
+                f.write("-" * 30 + "\n")  # Trenner für bessere Übersicht
 
 
 if __name__ == "__main__":
-
-    # Beispielaufruf
-    # Pfad zu deinem Bücherverzeichnis auf BigDaddy
-    #base_path = 'D:\\Bücher\\Business\\Biographien'
-    #base_path = r'D:\Bücher\Deutsch\A\Alexander Oetker'
-    # base_path = r'D:\Bücher\Deutsch\A'
-    # Pfad zu deinem Bücherverzeichnis auf der Synology
-    base_path = r"D:\Bücher\French\_sortiertGenre"
+    base_path = (r"D:\Bücher\Business")
     scan_ebooks(base_path)

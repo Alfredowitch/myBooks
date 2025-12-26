@@ -152,8 +152,8 @@ def _get_google_books_ratings(isbn):
 # --- Hauptfunktion für den Workflow (read_googleBooks) ---
 def read_google_books(book_metadata, language=None):
     """
-    Führt den Google Books API-Scan durch und reichert das BookMetadata-Objekt an.
-    Nutzt das BookMetadata-Objekt direkt für den Datenzugriff.
+    Führt den Google Books API-Scan durch und reichert das BookData-Objekt an.
+    Nutzt das BookData-Objekt direkt für den Datenzugriff.
     """
     if not book_metadata:
         return book_metadata

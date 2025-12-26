@@ -1,10 +1,14 @@
 """
 DATEI: create_db.py
-PROJEKT: MyBook-Management (v1.1)
-BESCHREIBUNG: Initialisierung der Datenbankstruktur für Version 1.1.
-              Inklusive Martian-Mapping und erweiterter Autoren-Vita.
+VERSION: 1.2.0
+BESCHREIBUNG: Erstellt oder erweitert die Datenbank-Struktur.
+     book_data_model.py: Das zentrale Formular mit scanner_version.
+     read_db_ebooks.py: Liest die Version und alle Daten sauber in das Objekt.
+     save_db_ebooks.py: Schreibt die Version und Updates zurück.
+     book_browser.py: Bereitet die Bookdaten aus Datei oder DB auf.
+     book_analyst.py: Analysisert die Datenbank nach Inkonsistenzen, Statistik, Auswertung
+     book_scanner.py: Scanned das Filesystem nach books. Nutzt die Version, um doppelte Arbeit zu vermeiden.
 """
-
 import sqlite3
 import os
 
@@ -80,7 +84,9 @@ def create_db(conn):
                         """)
 
         # 4. AUDIOBOOKS (Tabula Rasa für v1.1)
-        cursor.execute("DROP TABLE IF EXISTS audiobooks;")
+        # Initial haben wir audiobook neu angelegt.
+        # Danach jedoch sollte die Tabelle nur noch aktualisiert werden.
+        # cursor.execute("DROP TABLE IF EXISTS audiobooks;")
         cursor.execute("""
                         CREATE TABLE IF NOT EXISTS audiobooks (
                             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -97,6 +103,7 @@ def create_db(conn):
                             region TEXT,
                             stars REAL,
                             ave_rating TEXT,
+                            path TEXT,
                             cover_path TEXT,
                             speaker TEXT,
                             FOREIGN KEY (author_id) REFERENCES authors(id) ON DELETE CASCADE,
@@ -122,7 +129,143 @@ def create_db(conn):
         print(f"❌ Fehler bei der Initialisierung: {e}")
 
 
+def update_database_structure():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    # Liste der neuen Spalten, die wir in beiden Tabellen brauchen
+    new_columns = [
+        ("scanner_version", "TEXT"),
+        ("is_manual_description", "INTEGER DEFAULT 0"),  # Dein neues Schutz-Flag
+        ("rating_ol", "REAL"),       # Bewertung von OpenLibrary
+        ("ratings_count_ol", "INTEGER"),
+        ("api_source", "TEXT"),      # Dokumentiert, welche API zuletzt geliefert hat
+        ("path", "TEXT"),            # hat in audiobooks gefehlt
+        ("image_path", "TEXT")       # hat in books gefehlt
+    ]
+
+    tables = ["books", "audiobooks"]
+
+    for table in tables:
+        for col_name, col_type in new_columns:
+            try:
+                cursor.execute(f"ALTER TABLE {table} ADD COLUMN {col_name} {col_type}")
+                print(f"Spalte {col_name} zu {table} hinzugefügt.")
+            except sqlite3.OperationalError:
+                # Spalte existiert bereits, das ist okay
+                pass
+
+    conn.commit()
+    conn.close()
+
+def update_book_paths():
+    # Verbindung zur Datenbank
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    # Definition der Änderungen: (Alter Teil, Neuer Teil)
+    replacements = [
+        ('_sortiertGenre', '_byGenre'),
+        ('_sortierteRegion', '_byRegion')
+    ]
+
+    print("Starte Pfad-Aktualisierung...")
+
+    try:
+        for old_term, new_term in replacements:
+            # SQL: SET path = REPLACE(path, 'alt', 'neu')
+            # Das wirkt sich nur auf Zeilen aus, die den alten Begriff enthalten
+            query = f"UPDATE books SET path = REPLACE(path, ?, ?) WHERE path LIKE ?"
+            cursor.execute(query, (old_term, new_term, f"%{old_term}%"))
+
+            print(f"Abgeschlossen: '{old_term}' wurde durch '{new_term}' ersetzt. ({cursor.rowcount} Zeilen geändert)")
+
+        conn.commit()
+        print("\nErfolgreich gespeichert. Die Pfade im Analyser sollten jetzt wieder stimmen.")
+
+    except sqlite3.Error as e:
+        print(f"Ein Fehler ist aufgetreten: {e}")
+        conn.rollback()
+    finally:
+        conn.close()
+
+
+import sqlite3
+
+
+def check_db_simple_entry(file_path):
+    conn = sqlite3.connect(DB_PATH)
+    # Wir stellen um auf Row, damit wir Spaltennamen sehen
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    # Suche genau nach diesem Buch
+    query = "SELECT * FROM books WHERE path = ?"
+    cursor.execute(query, (file_path,))
+    row = cursor.fetchone()
+
+    if row:
+        print("--- Datenbank-Eintrag gefunden ---")
+        # Wir geben die wichtigsten Spalten aus
+        for key in row.keys():
+            print(f"{key}: {row[key]}")
+    else:
+        print("⚠️ Kein Eintrag für diesen Pfad in der Datenbank gefunden.")
+
+    conn.close()
+
+
+def check_db_entry(file_path):
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    # Die korrigierte Abfrage mit Joins zu den Autoren
+    query = """
+            SELECT b.*, a.firstname, a.lastname
+            FROM books b
+            LEFT JOIN book_authors ba ON b.id = ba.book_id
+            LEFT JOIN authors a ON ba.author_id = a.id
+            WHERE b.path = ?
+            """
+    cursor.execute(query, (file_path,))
+    row = cursor.fetchone()
+
+    if row:
+        print("--- Datenbank-Eintrag gefunden ---")
+        # Wir wandeln es in ein Dictionary um, um bequem damit zu arbeiten
+        data = dict(row)
+
+        # Wir berechnen den full_author direkt für die Anzeige
+        first = data.get('firstname') or ''
+        last = data.get('lastname') or 'Unbekannt'
+        full_author = f"{first} {last}".strip()
+
+        print(f"Berechneter Autor: {full_author}")
+        print("-" * 34)
+
+        # Alle Spalten ausgeben
+        for key in data.keys():
+            print(f"{key}: {data[key]}")
+    else:
+        print(f"⚠️ Kein Eintrag für diesen Pfad gefunden:\n{file_path}")
+
+
+
+    conn.close()
+
+
+
 if __name__ == "__main__":
-    connection = get_connection()
-    create_db(connection)
-    connection.close()
+    # Aufruf für 1. create_db
+    # connection = get_connection()
+    # create_db(connection)
+    # connection.close()
+
+    # Aufruf für weitere Funktionen
+    # update_database_structure()
+    # update_book_paths()
+
+    # Direkte Datenbankabfrage
+    buch_pfad = r"D:\Bücher\Business\Kommunikation\Schlagfertigkeit\Christine Öttl & Gitte Härter — Das 1x1 der Schlagfertigkeit (2011).epub"
+    check_db_entry(buch_pfad)

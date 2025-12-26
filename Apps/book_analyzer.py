@@ -1,7 +1,13 @@
-
+"""
+DATEI: book_analyzer.py
+PROJEKT: MyBook-Management (v1.2.0)
+BESCHREIBUNG: Analysiert die Daten in der Datenbank.
+              Zentrales Refresh-System für additive Filter und Code-Anzeige.
+"""
 import logging
 import os
 import tkinter as tk
+from tkinter import messagebox, ttk
 import pandas as pd
 import sqlite3
 
@@ -13,361 +19,333 @@ DB_PATH = r'M:/books.db'
 LOG_FILE = os.path.join(os.path.dirname(DB_PATH), 'analyzer.log')
 logger = logging.getLogger('LibraryAnalyzer')
 logger.setLevel(logging.DEBUG)
-# File Handler (Überschreibt die Datei bei jedem Start: mode='w')
 fh = logging.FileHandler(LOG_FILE, mode='w', encoding='utf-8')
-fh.setLevel(logging.DEBUG)
-# Console Handler
-ch = logging.StreamHandler()
-ch.setLevel(logging.INFO)
-# Formatierung
-formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-fh.setFormatter(formatter)
-ch.setFormatter(formatter)
+fh.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
 logger.addHandler(fh)
-logger.addHandler(ch)
-
-logger.info("Analyzer gestartet. Logfile: " + LOG_FILE)
 
 class LibraryAnalyzer:
     def __init__(self, master, db_path):
         self.master = master
         self.db_path = db_path
         self.master.title("Library Analyzer - Statistik & Analyse")
-        self.master.geometry("1100x700")
+        self.master.geometry("1200x850")
 
-        # Style für fette Überschriften definieren
-        style = tk.ttk.Style()
-        # 'treestyle' ist nur ein Name, wir ändern das Heading-Element
-        style.configure("Treeview.Heading", font=('Arial', 10, 'bold'))
+        # Zustands-Speicher (Das "Gedächtnis" für die Filter)
+        self.current_view = "snapshot"
+        self.current_lang = "Alles"
+        self.df = self.load_data()
 
-
-        # Layout
+        # UI Layout
         self.left_panel = tk.Frame(self.master, width=250, padx=10, pady=10, bg="#f0f0f0")
         self.left_panel.pack(side="left", fill="y")
-
         self.right_panel = tk.Frame(self.master, padx=10, pady=10)
         self.right_panel.pack(side="right", fill="both", expand=True)
 
         self.create_widgets()
-        # App reagiert auf Doppelklick auf den TreeView und started die CAllbak-Funktion
+
+        # Events
         self.tree.bind("<Double-1>", self.on_tree_double_click)
 
-        # Daten aus dem SQL-Laden!
-        self.df = self.load_data()
-
-        # Snapshot direkt beim Start anzeigen
+        # Start-Anzeige
         if not self.df.empty:
-            self.show_snapshot()
+            self.refresh_data()
 
-
-    # ----------------------------------------------------------------------
-    # GUI-ERSTELLUNG (UNVERÄNDERT)
-    # ----------------------------------------------------------------------
-    def create_widgets(self):
-        tk.Label(self.left_panel, text="Bibliothek Analyse", font=("Arial", 12, "bold"), bg="#f0f0f0").pack(pady=10)
-
-        tk.Button(self.left_panel, text="Snapshot (Übersicht)", width=25, command=self.show_snapshot,
-                  bg="#d1e7dd").pack(pady=5)
-        tk.Button(self.left_panel, text="Top 10 Autoren", width=25, command=self.show_top_authors).pack(pady=5)
-        tk.Button(self.left_panel, text="Genre-Statistik", width=25, command=self.show_genre_stats).pack(pady=5)
-        tk.Button(self.left_panel, text="Alle gelesenen Bücher", width=25, command=self.show_read_books).pack(pady=5)
-
-        tk.Label(self.left_panel, text="System", font=("Arial", 10, "italic"), bg="#f0f0f0").pack(pady=(20, 5))
-        tk.Button(self.left_panel, text="Beenden", width=25, command=self.master.quit).pack(pady=5)
-
-        tree_frame = tk.Frame(self.right_panel)
-        tree_frame.pack(fill="both", expand=True)
-
-        self.tree = tk.ttk.Treeview(tree_frame)
-        scrollbar_y = tk.ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=scrollbar_y.set)
-        self.tree.pack(side="left", fill="both", expand=True)
-        scrollbar_y.pack(side="right", fill="y")
-        tk.Label(self.left_panel, text="Diagnose", font=("Arial", 10, "italic"), bg="#f0f0f0").pack(pady=(20, 5))
-        tk.Button(self.left_panel, text="Logfile anzeigen", width=25, command=self.show_logfile, bg="#fff3cd").pack(
-            pady=5)
-        tk.Button(self.left_panel, text="Browser",
-                  width=25, bg="#ffc107", command=self.open_in_browser).pack(pady=10)
-
-        tk.Label(self.left_panel, text="Datenpflege", font=("Arial", 10, "italic"), bg="#f0f0f0").pack(pady=(20, 5))
-        tk.Button(self.left_panel, text="Anzeige aus DB löschen",
-                  width=25, bg="#f8d7da", fg="#721c24",  # Rötliche Warnfarbe
-                  command=self.delete_selected_records).pack(pady=5)
-
-
-    # ----------------------------------------------------------------------
-    # BÜCHER AUS DER DB IN DATENFRAME LADEN
-    # ----------------------------------------------------------------------
     def load_data(self):
-        logger.info("Starte Ladevorgang aus der Datenbank...")
         try:
             conn = sqlite3.connect(self.db_path)
-            # SQL mit JOIN wie besprochen
             query = """
                     SELECT b.*, a.firstname, a.lastname
                     FROM books b
                              LEFT JOIN book_authors ba ON b.id = ba.book_id
-                             LEFT JOIN authors a ON ba.author_id = a.id \
+                             LEFT JOIN authors a ON ba.author_id = a.id
                     """
             df = pd.read_sql_query(query, conn)
             conn.close()
-
-            # Namen aufbereiten
             df['full_author'] = (df['firstname'].fillna('') + ' ' + df['lastname'].fillna('Unbekannt')).str.strip()
-
-            logger.info(f"Daten erfolgreich geladen. Zeilen im DataFrame: {len(df)}")
-            logger.debug(f"Verfügbare Spalten: {df.columns.tolist()}")
-
-            # Hier loggen wir stichprobenartig Alexander Oetker, um zu sehen was passiert
-            oetker_check = df[df['full_author'].str.contains('Oetker', case=False, na=False)]
-            logger.debug(f"Oetker Check: {len(oetker_check)} Einträge gefunden.")
-
             return df
         except Exception as e:
-            logger.error(f"Kritischer Fehler beim Laden der DB: {e}", exc_info=True)
+            logger.error(f"Fehler beim Laden: {e}")
             return pd.DataFrame()
 
-    # ----------------------------------------------------------------------
-    # HILFS-FUNKTIONEN
-    # ----------------------------------------------------------------------
-    def _get_author_col(self):
-        """Gibt den Namen der Autoren-Spalte zurück, mit Fallback-Sicherheit."""
-        # 1. Unser Standardname
-        if 'full_author' in self.df.columns:
-            return 'full_author'
+    def create_widgets(self):
+        # --- TOP BAR (PANDAS CODE) ---
+        self.top_bar = tk.Frame(self.right_panel, bg="#333", padx=5, pady=5)
+        self.top_bar.pack(side="top", fill="x")
+        tk.Label(self.top_bar, text="Pandas Code:", fg="#00ff00", bg="#333", font=("Consolas", 10, "bold")).pack(side="left")
+        self.code_label = tk.Label(self.top_bar, text="df", fg="white", bg="#333", font=("Consolas", 10), wraplength=800, justify="left")
+        self.code_label.pack(side="left", padx=10)
 
-        # 2. Falls wir mal eine andere Liste (z.B. Rohdaten) anzeigen
-        for col in ['author', 'authors', 'authors_raw']:
-            if col in self.df.columns:
-                return col
+        # --- FILTER BAR ---
+        filter_frame = tk.Frame(self.right_panel, pady=5)
+        filter_frame.pack(side="top", fill="x")
+        tk.Label(filter_frame, text="Globaler Sprachfilter:").pack(side="left", padx=5)
+        self.lang_var = tk.StringVar(value="Alles")
+        langs = ["Alles", "de", "en", "es", "it", "fr"]
+        self.lang_dropdown = tk.OptionMenu(filter_frame, self.lang_var, *langs, command=self.apply_language_filter)
+        self.lang_dropdown.pack(side="left", padx=5)
 
-        # 3. Letzter Ausweg: Die erste Spalte nehmen (verhindert Absturz)
-        return self.df.columns[0] if not self.df.empty else None
+        # --- BUTTONS (LINKS) ---
+        tk.Label(self.left_panel, text="Bibliothek Analyse", font=("Arial", 12, "bold"), bg="#f0f0f0").pack(pady=10)
 
-    def on_tree_double_click(self, event):
-        """Wechselt von der Statistik zur Einzelansicht der Bücher dieses Autors."""
-        selected_item = self.tree.selection()
-        if not selected_item:
-            return
+        actions = [
+            ("Snapshot", self.show_snapshot, "#d1e7dd"),
+            ("Top 30 Autoren", self.show_top_authors, None),
+            ("Bottom 30 Autoren", self.show_bottom_authors, None),
+            ("Genre-Statistik", self.show_genre_stats, None),
+            ("Regionen-Statistik", self.show_region_stats, None)
+        ]
+        for text, cmd, color in actions:
+            tk.Button(self.left_panel, text=text, width=25, command=cmd, bg=color).pack(pady=2)
 
-        values = self.tree.item(selected_item)['values']
-        columns = list(self.tree["columns"])
+        tk.Label(self.left_panel, text="Health-Report", font=("Arial", 10, "bold"), bg="#f0f0f0").pack(pady=(15, 5))
+        tk.Button(self.left_panel, text="Doppelte Titel", width=25, bg="#ffcc00", command=self.show_double_titles).pack(pady=2)
+        tk.Button(self.left_panel, text="Ähnliche Autoren (Punkt)", width=25, bg="#ffcc00", command=self.show_fuzzy_authors).pack(pady=2)
 
-        # Wenn wir in der Statistik sind, heißt die Spalte oft 'Autor'
-        author_col = None
-        for col in ['autor', 'author', 'full_author']:
-            if col in columns:
-                author_col = columns.index(col)
-                break
+        tk.Label(self.left_panel, text="Tools", font=("Arial", 10, "bold"), bg="#f0f0f0").pack(pady=(15, 5))
+        tk.Button(self.left_panel, text="Browser öffnen", width=25, bg="#ffc107", command=self.open_in_browser).pack(pady=2)
+        tk.Button(self.left_panel, text="Aus DB löschen", width=25, bg="#f8d7da", fg="#721c24", command=self.delete_selected_records).pack(pady=2)
 
-        if author_col is not None:
-            author_name = values[author_col]
-            # Jetzt filtern wir das gesamte DataFrame nach diesem Namen
-            # Und zeigen die Einzel-Buch-Liste an (mit IDs!)
-            subset = self.df[self.df['full_author'] == author_name]
+        tk.Button(self.left_panel, text="Beenden", width=25, command=self.master.quit, bg="#6c757d", fg="white").pack(side="bottom", pady=20)
 
-            # Wichtig: Wir nehmen die ID mit in die Anzeige
-            display_cols = ['id', 'title', 'full_author', 'series_name', 'path']
-            available = [c for c in display_cols if c in subset.columns]
-
-            self.display_in_tree(subset[available])
-            logger.info(f"Drill-down für Autor: {author_name}")
-
-    def get_selected_ids(self):
-        selected_items = self.tree.selection()
-        if not selected_items:
-            # Wenn nichts markiert ist: Alle IDs zurückgeben
-            return self.df['id'].tolist()
-
-        columns = list(self.tree["columns"])
-        item_id = selected_items[0]
-        values = self.tree.item(item_id)['values']
-
-        mask = None
-        # Die bekannte Logik
-        if 'id' in columns:
-            idx = columns.index('id')
-            mask = (self.df['id'] == int(values[idx]))
-        elif 'Autor' in columns:
-            idx = columns.index('Autor')
-            mask = (self.df['full_author'] == values[idx])
-        elif 'Genre' in columns:
-            idx = columns.index('Genre')
-            mask = (self.df['genre'] == values[idx])
-
-        if mask is not None:
-            return self.df[mask]['id'].tolist()
-        return []
+        # --- TREEVIEW ---
+        tree_frame = tk.Frame(self.right_panel)
+        tree_frame.pack(fill="both", expand=True)
+        self.tree = ttk.Treeview(tree_frame)
+        scrollbar_y = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scrollbar_y.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        scrollbar_y.pack(side="right", fill="y")
 
     # ----------------------------------------------------------------------
-    # Anzeige-FUNKTIONEN
+    # ZENTRALE LOGIK (DER MOTOR)
     # ----------------------------------------------------------------------
-
-    def show_snapshot(self):
-        """Erzeugt eine kurze Zusammenfassung der Datenbank."""
+    def refresh_data(self):
         if self.df.empty: return
 
-        total_books = len(self.df)
-        author_col = self._get_author_col()
-        total_authors = self.df[author_col].nunique()
+        # 1. Schritt: Sprachfilter (Das Fundament)
+        if self.current_lang == "Alles":
+            df_work = self.df
+            l_code = "df"
+        else:
+            df_work = self.df[self.df['language'] == self.current_lang]
+            l_code = f"df[df['language'] == '{self.current_lang}']"
 
-        # Wir erstellen ein kleines DataFrame für die Anzeige
-        snapshot_data = pd.DataFrame({
-            'Kategorie': ['Bücher Gesamt', 'Autoren Gesamt', 'Gelesene Bücher', 'Ungelesen'],
-            'Wert': [
-                total_books,
-                total_authors,
-                self.df[self.df['is_read'] == 1].shape[0] if 'is_read' in self.df.columns else "N/A",
-                self.df[self.df['is_read'] != 1].shape[0] if 'is_read' in self.df.columns else "N/A"
-            ]
-        })
-        self.display_in_tree(snapshot_data)
+        # 2. Schritt: Ansicht (Die Analyse)
+        final_code = ""
+        result = pd.DataFrame()
 
-    def show_top_authors(self):
-        if self.df.empty:
-            return
+        if self.current_view == "snapshot":
+            res_data = {
+                'Kategorie': ['Bücher', 'Autoren', 'Gelesen'],
+                'Wert': [len(df_work), df_work['full_author'].nunique(),
+                        len(df_work[df_work['is_read']==1]) if 'is_read' in df_work.columns else 0]
+            }
+            result = pd.DataFrame(res_data)
+            final_code = f"{l_code}.agg({{'id':'count', 'full_author':'nunique'}})"
+        elif self.current_view == "top_authors":
+            result = df_work.groupby('full_author')['id'].count().reset_index()
+            result.columns = ['Autor', 'Bücher']
+            result = result.sort_values(by='Bücher', ascending=False).head(30)
+            final_code = f"{l_code}.groupby('full_author')['id'].count().sort_values(ascending=False).head(30)"
+        elif self.current_view == "bottom_authors":
+            result = df_work.groupby('full_author')['id'].count().reset_index()
+            result.columns = ['Autor', 'Bücher']
+            result = result.sort_values(by='Bücher', ascending=False).tail(30)
+            final_code = f"{l_code}.groupby('full_author')['id'].count().sort_values(ascending=False).head(30)"
+        elif self.current_view == "genre":
+            result = df_work['genre'].value_counts().reset_index()
+            result.columns = ['Genre', 'Menge']
+            final_code = f"{l_code}['genre'].value_counts()"
+        elif self.current_view == "double_titles":
+            result = df_work[df_work.duplicated(subset=['title'], keep=False)]
+            result = result.sort_values(by='title')[['id', 'title', 'full_author', 'language', 'path']]
+            final_code = f"{l_code}[{l_code}.duplicated(subset=['title'], keep=False)]"
 
-        # Wir gruppieren nach dem Namen und zählen die Buch-IDs
-        # Damit verhindern wir, dass IDs angezeigt werden.
-        top_stats = self.df.groupby('full_author')['id'].count().reset_index()
+        elif self.current_view == "fuzzy_authors":
+            # Trick: Wir entfernen Punkte temporär für den Vergleich
+            df_work = df_work.copy()
+            df_work['clean_name'] = df_work['full_author'].str.replace('.', '', regex=False)
+            duplicates = df_work[df_work.duplicated(subset=['clean_name'], keep=False)]
+            result = duplicates.sort_values(by='clean_name')[['id', 'full_author', 'title']]
+            final_code = f"{l_code}[{l_code}['full_author'].str.replace('.','').duplicated(keep=False)]"
 
-        # Spalten benennen
-        top_stats.columns = ['Autor', 'Anzahl Bücher']
+        # 3. Schritt: UI Update
+        self.code_label.config(text=final_code)
+        self.display_in_tree(result)
 
-        # Sortieren: Höchste Anzahl zuerst, dann alphabetisch
-        top_stats = top_stats.sort_values(by=['Anzahl Bücher', 'Autor'], ascending=[False, True])
+    # --- Button-Steuerung ---
+    def apply_language_filter(self, selection):
+        self.current_lang = selection
+        self.refresh_data()
 
-        # Die besten 10 nehmen
-        top_10 = top_stats.head(10)
+    def show_snapshot(self): self.current_view = "snapshot"; self.refresh_data()
+    def show_top_authors(self): self.current_view = "top_authors"; self.refresh_data()
+    def show_bottom_authors(self): self.current_view = "bottom_authors"; self.refresh_data()
+    def show_genre_stats(self): self.current_view = "genre"; self.refresh_data()
+    def show_region_stats(self): self.current_view = "region"; self.refresh_data() # (In refresh_data ergänzbar)
+    def show_double_titles(self): self.current_view = "double_titles"; self.refresh_data()
+    def show_fuzzy_authors(self): self.current_view = "fuzzy_authors"; self.refresh_data()
 
-        self.display_in_tree(top_10)
-
-    def show_genre_stats(self):
-        if 'genre' in self.df.columns:
-            stats = self.df['genre'].value_counts().reset_index()
-            stats.columns = ['Genre', 'Menge']
-            self.display_in_tree(stats)
-
-    def show_read_books(self):
-        if 'is_read' in self.df.columns:
-            # Filtern nach gelesenen Büchern
-            read_df = self.df[self.df['is_read'] == 1].copy()
-
-            # Nur die Spalten auswählen, die wir sehen wollen
-            display_cols = ['id','title', 'full_author', 'series_name', 'series_number']
-            # Sicherstellen, dass sie existieren (falls Spalten in der DB fehlen)
-            existing_cols = [c for c in display_cols if c in read_df.columns]
-
-            self.display_in_tree(read_df[existing_cols])
-
+    # ----------------------------------------------------------------------
+    # HILFSFUNKTIONEN (BLEIBEN FAST GLEICH)
+    # ----------------------------------------------------------------------
     def display_in_tree(self, dataframe):
-        """Zeigt Daten an und sorgt dafür, dass die ID-Spalte für Löschvorgänge bereitsteht."""
         self.tree.delete(*self.tree.get_children())
-
-        columns = list(dataframe.columns)
-        self.tree["columns"] = columns
+        cols = list(dataframe.columns)
+        self.tree["columns"] = cols
         self.tree["show"] = "headings"
-
-        for col in columns:
+        for col in cols:
             self.tree.heading(col, text=col, anchor="w")
-
-            # Spezialbehandlung für die ID-Spalte
-            if col.lower() == 'id':
-                self.tree.column(col, width=50, anchor="center")  # Schön schmal
-            else:
-                self.tree.column(col, width=250, anchor="w")
-
+            self.tree.column(col, width=100 if col=='id' else 250)
         for _, row in dataframe.iterrows():
             self.tree.insert("", "end", values=[str(v) for v in list(row)])
 
-        logger.info(f"Tabelle aktualisiert. Spalten: {columns}")
+    def get_selected_ids(self):
+        items = self.tree.selection()
+        if not items:
+            print("Debug: Keine Zeile im Tree markiert.")
+            return []
+        cols = list(self.tree["columns"])
+        if 'id' in cols:
+            idx = cols.index('id')
+            ids = [int(self.tree.item(i)['values'][idx]) for i in items]
+            print(f"Debug: Rohwert aus Spalte 'id': {ids[0]} (Typ: {type(ids[0])})")
+            return ids
+        return []
 
-    def show_books_without_author(self):
-        # Filtert auf Einträge, wo der Nachname 'Unbekannt' oder leer ist
-        # Je nachdem, wie dein load_data die Felder füllt
-        mask = (self.df['full_author'].str.contains('Unbekannt', na=True)) | (self.df['full_author'] == "")
-        bad_books = self.df[mask]
-        self.display_in_tree(bad_books)
-        logger.info(f"Filter aktiv: {len(bad_books)} Bücher ohne Autor gefunden.")
+    def get_all_visible_ids(self):
+        # Holt alle IDs, die aktuell im Treeview angezeigt werden
+        items = self.tree.get_children()
+        """
+        # Wir schauen uns die Spaltenüberschriften an (case-insensitive)
+        cols = [c.lower() for c in list(self.tree["columns"])]
 
-    def show_logfile(self):
-        """Öffnet ein Fenster und zeigt den aktuellen Inhalt des Logfiles."""
-        log_window = tk.Toplevel(self.master)
-        log_window.title("System Logfile")
-        log_window.geometry("800x500")
+        if 'id' in cols:
+            idx = cols.index('id')
+            ids = []
+            for i in items:
+                values = self.tree.item(i)['values']
+                if values:
+                    try:
+                        # Sicherstellen, dass wir einen Integer bekommen
+                        val = float(values[idx])
+                        ids.append(int(val))
+                    except (ValueError, IndexError):
+                        continue
+            return ids
 
-        text_area = tk.Text(log_window, wrap='none', bg="#1e1e1e", fg="#d4d4d4", font=("Consolas", 10))
-        text_area.pack(fill="both", expand=True)
+        print(f"Fehler: Spalte 'id' nicht gefunden. Vorhanden sind: {cols}")
+        return []
+        """
+        cols = list(self.tree["columns"])
+        if 'id' in cols:
+            idx = cols.index('id')
+            return [int(self.tree.item(i)['values'][idx]) for i in items]
+        return []
 
-        # Scrollbars für das Log
-        sy = tk.Scrollbar(text_area, command=text_area.yview)
-        sy.pack(side="right", fill="y")
-        sx = tk.Scrollbar(text_area, orient="horizontal", command=text_area.xview)
-        sx.pack(side="bottom", fill="x")
-        text_area.config(yscrollcommand=sy.set, xscrollcommand=sx.set)
-
-        try:
-            with open(LOG_FILE, 'r', encoding='utf-8') as f:
-                content = f.read()
-                text_area.insert('1.0', content)
-                text_area.config(state='disabled')  # Nur Lesen
-                text_area.see(tk.END)  # Zum Ende scrollen
-        except Exception as e:
-            text_area.insert('1.0', f"Fehler beim Lesen des Logfiles: {e}")
-
-
-    # ----------------------------------------------------------------------
-    # FUNKTIONEN für den Aufruf des Browsers
-    # ----------------------------------------------------------------------
     def open_in_browser(self):
-        # 1. Wir holen die IDs der markierten Zeile (z.B. alle IDs eines Autors)
-        selected_ids = self.get_selected_ids()
+        # Wir suchen erst selektierte Bücher, dann alle sichtbaren
+        ids = self.get_selected_ids()
+        if not ids:
+            ids = self.get_all_visible_ids()
 
-        if selected_ids:
-            # Wir haben eine Auswahl -> Filtere Pfade basierend auf diesen IDs
-            # self.df['id'].isin(selected_ids): Pandas geht die Spalte "id" durch und markiert jede Zeile mit True, deren ID in deiner Liste der ausgewählten IDs vorkommt.
-            # self.df[...]: Das äußere Gehäuse nimmt nur diese "True"-Zeilen (das Filtern).
-            # ['path']: Von diesen gefilterten Zeilen nehmen wir nur den Wert aus der Spalte "path"
-            path_list = self.df[self.df['id'].isin(selected_ids)]['path'].tolist()
-            logger.info(f"Browser mit Auswahl gestartet ({len(path_list)} Bücher).")
+        if ids:
+            # 1. Fall: Wir haben IDs direkt im Tree (z.B. bei "double_titles" oder "fuzzy_authors")
+            path_list = self.df[self.df['id'].isin(ids)]['path'].tolist()
         else:
-            # 2. KEINE Auswahl -> Wir nehmen einfach ALLES
-            path_list = self.df['path'].tolist()
-            logger.info(f"Nichts markiert. Browser mit allen {len(path_list)} Pfaden gestartet.")
+            # 2. Fall: Wir haben keine IDs, aber vielleicht Autoren ausgewählt?
+            # Wir schauen, was im Tree markiert ist
+            items = self.tree.selection()
+            if not items:
+                items = self.tree.get_children()  # Nimm alle, wenn nichts markiert
+            cols = list(self.tree["columns"])
+            if 'Autor' in cols:
+                idx = cols.index('Autor')
+                selected_authors = [self.tree.item(i)['values'][idx] for i in items]
+                # Jetzt holen wir uns alle Pfade aus dem Haupt-DF, die zu diesen Autoren passen
+                # Wichtig: Wir nutzen df_work (oder self.df), um nur die passende Sprache zu kriegen
+                path_list = self.df[self.df['full_author'].isin(selected_authors)]['path'].tolist()
+            else:
+                print("Keine IDs und keine Autorenspalte zur Identifikation gefunden.")
+                return
 
-        # 3. Übergabe an den Browser
         if path_list:
-            browser_window = tk.Toplevel(self.master)
-            BookBrowser(browser_window, initial_list=path_list)
+            from Apps.book_browser import BookBrowser  # Sicherstellen, dass Import passt
+            BookBrowser(tk.Toplevel(self.master), initial_list=path_list)
+        else:
+            print("Keine Daten zum Übernehmen vorhanden.")
 
-
-    # ----------------------------------------------------------------------
-    # FUNKTIONEN für die Datenbankpflege
-    # ----------------------------------------------------------------------
     def delete_selected_records(self):
-        del_ids = self.get_selected_ids()
+        # 1. Versuch: IDs direkt aus dem Tree holen
+        ids = self.get_selected_ids()
 
-        if not del_ids:
+        # 2. Versuch: Falls keine IDs da sind, schauen ob Autoren selektiert sind
+        if not ids:
+            items = self.tree.selection()
+            if not items: return
+
+            cols = list(self.tree["columns"])
+            if 'Autor' in cols:
+                idx = cols.index('Autor')
+                selected_authors = [self.tree.item(i)['values'][idx] for i in items]
+                # Hol die IDs aller Bücher dieser Autoren
+                ids = self.df[self.df['full_author'].isin(selected_authors)]['id'].tolist()
+
+        if not ids:
+            logger.warning("Keine Datensätze zum Löschen identifiziert.")
             return
 
-        # Ab hier dein SQL-Batch-Delete (wie oben besprochen)
+        # Bestätigung einholen (Wichtig, da es jetzt viele Bücher sein könnten!)
+        if not messagebox.askyesno("Löschen", f"Sollen {len(ids)} Datensätze wirklich gelöscht werden?"):
+            return
+
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
-                id_params = [(i,) for i in del_ids]
+                # Foreign Key Constraint beachten: Erst die Verknüpfungen!
+                cursor.executemany("DELETE FROM book_authors WHERE book_id = ?", [(i,) for i in ids])
+                cursor.executemany("DELETE FROM books WHERE id = ?", [(i,) for i in ids])
 
-                # Erst Links, dann Bücher
-                cursor.executemany("DELETE FROM book_authors WHERE book_id = ?", id_params)
-                cursor.executemany("DELETE FROM books WHERE id = ?", id_params)
-                conn.commit()
-
-            # Speicher bereinigen & UI Refresh
-            self.df = self.df[~self.df['id'].isin(del_ids)]
-            self.show_snapshot()
-            logger.info(f"{len(del_ids)} Bücher gelöscht.")
-
+            # DataFrame im Speicher aktualisieren
+            self.df = self.df[~self.df['id'].isin(ids)]
+            self.refresh_data()
+            logger.info(f"{len(ids)} Datensätze aus DB und Analyse entfernt.")
         except Exception as e:
-            logger.error(f"Batch-Delete Fehler: {e}")
+            logger.error(f"Löschfehler: {e}")
+            messagebox.showerror("Fehler", f"Löschfehler: {e}")
+
+    def on_tree_double_click(self, event):
+        item = self.tree.selection()
+        if not item: return
+
+        values = self.tree.item(item[0])['values']
+        cols = list(self.tree["columns"])
+
+        # Fall A: Wir haben eine ID (direkter Buch-Zugriff)
+        if 'id' in cols:
+            book_id = values[cols.index('id')]
+            # Vielleicht willst du hier direkt den Browser öffnen?
+            # Oder einfach das eine Buch im Tree isolieren:
+            subset = self.df[self.df['id'] == book_id]
+
+        # Fall B: Wir haben einen Autor (Drill-Down auf alle Bücher des Autors)
+        elif 'Autor' in cols or 'full_author' in cols:
+            col_name = 'Autor' if 'Autor' in cols else 'full_author'
+            name = values[cols.index(col_name)]
+            subset = self.df[self.df['full_author'] == name]
+
+        # Fall C: Wir haben ein Genre (Drill-Down auf alle Bücher des Genres)
+        elif 'Genre' in cols:
+            genre_name = values[cols.index('Genre')]
+            subset = self.df[self.df['genre'] == genre_name]
+        else:
+            return
+
+        # Ergebnis anzeigen (wechselt meistens die Ansicht auf eine Buchliste)
+        if not subset.empty:
+            self.display_in_tree(subset[['id', 'title', 'full_author', 'language', 'path']])
+            # Wir setzen den View-Status intern zurück, damit refresh_data weiß, wo wir sind
+            self.current_view = "custom_drilldown"
 
 if __name__ == "__main__":
     root = tk.Tk()

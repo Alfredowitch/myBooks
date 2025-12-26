@@ -1,3 +1,10 @@
+"""
+DATEI: check.py
+PROJEKT: MyBook-Management (v1.2.0)
+BESCHREIBUNG: Kümmert sich um die Verarbeitung von Missmatch in Autoren oder Titel von filename und epub.
+              Alle Missmatches werden in eine Datenstruktur geschrieben und können ausgegeben werden.
+              Das erzeugte txt-File kann mit dem Book-Browser geladen werden.
+"""
 # file_utils.py (oder in deinem Hauptskript)
 import re
 import os
@@ -42,6 +49,20 @@ def normalize_author_tuple(author_tuple: tuple) -> tuple:
 def check_for_mismatch(file_path: str, file_title: str, epub_title: str,
                        file_authors: list, epub_authors: list,
                        epub_series_name: str = None, epub_series_number: str = None) -> dict | None:
+    """
+        Für jedes Buch geben wir ein Dictionary zurück
+            {
+                'filename': 'Boris Gloger...epub',
+                'full_path': 'D:\\Bücher\\Business\\Agile\\Boris Gloger...epub',
+                'file_author': [('Gloger', 'Boris'), ('Rösner', 'Dieter')],
+                'epub_author': [('Rösner Boris Gloger', 'Dieter')],
+                'epub_series_name': None,
+                'epub_series_number': None
+            }
+        Der Scanner baut daraus eine Liste von Dictionaries
+        mismatch_list.append(neues_dict)
+    """
+
     mismatch = {}
     filename = os.path.basename(file_path)
 
@@ -82,6 +103,8 @@ def check_for_mismatch(file_path: str, file_title: str, epub_title: str,
 
     if mismatch:
         mismatch['filename'] = filename
+        # NEU: Wir speichern den vollen, übergebenen Pfad ab
+        mismatch['full_path'] = os.path.abspath(file_path)
         return mismatch
 
     return None

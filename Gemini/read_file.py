@@ -1,15 +1,56 @@
+"""
+DATEI: read_file.py
+PROJEKT: MyBook-Management (v1.2.0)
+BESCHREIBUNG: Kümmert sich um das Auslesen der Daten aus dem Pfadnamen und Filenamen..
+              Bücher sind durch den Pfad sauber in Deutch, French, English, Italienisch und Spanisch getrennt.
+              Es gibt eine thematische Sortierung unter Business, diese Pfad-Teile werden in Keywords abgespeichert
+              Es gibt eine Sortierung _byGenre und _byRegion woraus die Region und Gene gefüllt werden.
+              Und des gibt _Easy Reader und _Sprache wo Bücher für den Spracherwerb sortiert sind.
+
+              Die Filenamen folgen der Ordnung:  vorname1 nachname2 & vorname2 nachname2 -- Serienname Seriennummer-Titel (Jahr).suffix
+              -- ist ein langer Gedankenstrich em-
+              vorname kann vornamea vornameb v. sein.
+"""
 import re
 import os
 
+def get_final_language(file_path, api_lang=None):
+    """Erzwingt deine Sprachregeln."""
+    path_lower = file_path.lower()
+    # 1. Priorität: Der Ordnername
+    if "deutsch" in path_lower: return "de"
+    if "english" in path_lower: return "en"
+    if "french" in path_lower or "franz" in path_lower: return "fr"
+    if "italien" in path_lower: return "it"
+    if "spanisch" in path_lower: return "es"
+
+    # 2. Priorität: API/EPUB Mapping (nur die erlaubten)
+    allowed = {'de', 'en', 'fr', 'it', 'es'}
+    if api_lang:
+        clean_api = str(api_lang).lower()[:2]  # nur erste zwei Zeichen (en-us -> en)
+        if clean_api in allowed:
+            return clean_api
+
+    return "de"  # Fallback
 
 def _normalize_author_name(raw_name_string):
     """
-    Normalisiert einen rohen Autorennamen-String in das Format (Vorname, Nachname).
+    Normalisiert Autorennamen. Erkennt 'Vorname Nachname' und 'Nachname, Vorname'.
+    Gibt (Vorname, Nachname) zurück.
     """
     if not isinstance(raw_name_string, str) or not raw_name_string.strip():
         return None
 
     raw_name = raw_name_string.strip()
+
+    # Fall 1: Format "Nachname, Vorname" (erkannt durch das Komma)
+    if "," in raw_name:
+        parts = raw_name.split(",", 1) # Nur am ersten Komma splitten
+        lastname = parts[0].strip()
+        firstname = parts[1].strip() if len(parts) > 1 else ""
+        return (firstname, lastname)
+
+    # Fall 2: Format "Vorname Nachname" (oder nur ein Teil)
     parts = raw_name.split()
 
     if len(parts) >= 2:
@@ -18,7 +59,7 @@ def _normalize_author_name(raw_name_string):
         lastname = parts[-1]
         return (firstname, lastname)
     elif len(parts) == 1:
-        # Nur ein Teil (wird als Nachname gespeichert, Vorname bleibt leer)
+        # Nur ein Teil (Nachname)
         return ("", parts[0])
 
     return None
@@ -146,19 +187,13 @@ def derive_metadata_from_path(file_path):
     """
     Leitet Sprache, Region, Genre und Keywords aus der neuen Ordnerstruktur ab.
     """
-    normalized_path = os.path.normpath(file_path)
-    path_parts = normalized_path.split(os.sep)
-
-    language = None
+    path_parts = os.path.normpath(file_path).split(os.sep)
     region = None
     manual_genre = None
     keywords = []
 
     # 1. Sprache erkennen (Deutsch oder Englisch)
-    if 'Deutsch' in path_parts:
-        language = 'de'
-    elif 'English' in path_parts or 'Englisch' in path_parts:
-        language = 'en'
+    language = get_final_language(file_path)
 
     # 2. Themen-Pfad für Business-Bücher (als Keywords)
     # Falls der Pfad über "Business" läuft, extrahieren wir die Hierarchie
@@ -174,12 +209,12 @@ def derive_metadata_from_path(file_path):
     for i, part in enumerate(path_parts):
 
         # A) Genre aus _sortiertGenre/GenreName/Autor
-        if part == '_sortiertGenre':
+        if part == '_byGenre':
             if i + 1 < len(path_parts):
                 manual_genre = path_parts[i + 1]
 
         # B) Region aus _sortiertRegion/RegionName/Autor
-        elif part == '_sortiertRegion':
+        elif part == '_bytRegion':
             if i + 1 < len(path_parts):
                 region = path_parts[i + 1]
 
