@@ -23,6 +23,31 @@ fh = logging.FileHandler(LOG_FILE, mode='w', encoding='utf-8')
 fh.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
 logger.addHandler(fh)
 
+def cleanup_file_names_and_paths(db_path):
+    # 1. Alle Bücher laden
+    all_books = load_all_books_from_db(db_path)
+
+    for book in all_books:
+        current_path = book.path
+        filename = os.path.basename(current_path)
+
+        # Prüfe auf das Muster "Nachname, Vorname - Titel"
+        if "," in filename and " - " in filename:
+            new_filename = fix_filename_format(filename)  # Deine Logik zum Umdrehen
+            new_path = os.path.join(os.path.dirname(current_path), new_filename)
+
+            # Physisches Umbenennen
+            if not os.path.exists(new_path):
+                os.rename(current_path, new_path)
+
+                # Objekt aktualisieren
+                book.path = new_path
+                # Wichtig: Hier rufen wir direkt save() auf,
+                # weil wir nur den Pfad ändern wollen, nicht die Metadaten.
+                book.save(db_path)
+                print(f"Begradigt: {new_filename}")
+
+
 class LibraryAnalyzer:
     def __init__(self, master, db_path):
         self.master = master
@@ -346,6 +371,9 @@ class LibraryAnalyzer:
             self.display_in_tree(subset[['id', 'title', 'full_author', 'language', 'path']])
             # Wir setzen den View-Status intern zurück, damit refresh_data weiß, wo wir sind
             self.current_view = "custom_drilldown"
+
+
+
 
 if __name__ == "__main__":
     root = tk.Tk()

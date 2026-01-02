@@ -5,8 +5,9 @@ BESCHREIBUNG: Schreibt die Daten aus der Datenbank (SQL-Light), einschließlich 
               Sicherheit eingebaut, dass bestehende id übernommen wird, aber id= 0 ignoriert wird.
 """
 import sqlite3
+import os
 from dataclasses import asdict
-from book_data_model import BookData
+from Apps.book_data import BookData
 
 _DEFAULT_DB_PATH = r'M://books.db'
 
@@ -17,6 +18,18 @@ def update_db_path(old_path, new_path, db_path=None): # self raus, db_path rein
     try:
         cursor = conn.cursor()
         cursor.execute("UPDATE books SET path = ? WHERE path = ?", (new_path, old_path))
+        if cursor.rowcount == 0:
+            print(f"!!! KRITISCH: Update fehlgeschlagen für Pfad: {repr(data.path)}")
+            # Gegenprobe: Existiert der Pfad überhaupt in der DB?
+            cursor.execute("SELECT path FROM books WHERE path LIKE ?", (f"%{os.path.basename(data.path)}",))
+            match = cursor.fetchone()
+            if match:
+                print(f"    Gefunden in DB: {repr(match[0])}")
+                print(f"    Vergleich: {'IDENTISCH' if match[0] == data.path else 'UNTERSCHIEDLICH'}")
+            else:
+                print("    Pfad existiert gar nicht in der Datenbank (auch nicht per LIKE).")
+        else:
+            print(f"DEBUG: Update erfolgreich. {cursor.rowcount} Zeile(n) geändert.")
         conn.commit()
     finally:
         conn.close()
@@ -66,6 +79,18 @@ def save_book_with_authors(book: BookData, db_path=None):
         placeholders = ", ".join(["?"] * len(clean_data))
         sql = f"INSERT OR REPLACE INTO books ({columns}) VALUES ({placeholders})"
         cursor.execute(sql, list(clean_data.values()))
+        if cursor.rowcount == 0:
+            print(f"!!! KRITISCH: SAVE ohne Autors fehlgeschlagen für Pfad: {repr(clean_data.path)}")
+            # Gegenprobe: Existiert der Pfad überhaupt in der DB?
+            cursor.execute("SELECT path FROM books WHERE path LIKE ?", (f"%{os.path.basename(clean_data.path)}",))
+            match = cursor.fetchone()
+            if match:
+                print(f"    Gefunden in DB: {repr(match[0])}")
+                print(f"    Vergleich: {'IDENTISCH' if match[0] == clean_data.path else 'UNTERSCHIEDLICH'}")
+            else:
+                print("    Pfad existiert gar nicht in der Datenbank (auch nicht per LIKE).")
+        else:
+            print(f"DEBUG: Update erfolgreich. {cursor.rowcount} Zeile(n) geändert.")
 
         # 3. DIE ID HOLEN (Der wichtige Teil für die Autoren!)
         book_id = cursor.lastrowid

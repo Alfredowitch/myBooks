@@ -8,8 +8,7 @@ BESCHREIBUNG: Kümmert sich um die Daten von der Book_Browser App.
 """
 import os
 import shutil
-import sqlite3
-from typing import List, Optional
+from typing import List
 
 # --- Importe deiner spezialisierten Module ---
 try:
@@ -17,72 +16,41 @@ try:
     from save_db_ebooks import save_book_with_authors, update_db_path
     from read_file import derive_metadata_from_path
     from read_epub import get_epub_metadata
-    from book_data_model import BookData
+    from Apps.book_data import BookData
+    from Apps.book_scanner import scan_single_book
 except ImportError as e:
     print(f"WARNUNG: Ein Untermodul im Model konnte nicht geladen werden: {e}")
 
 
 class BrowserModel:
     def __init__(self, db_path: str):
-        self.db_path = db_path
+        #self.db_path = db_path
         self.temp_files = []
 
     # ----------------------------------------------------------------------
     # DATEN-AGGREGATION
     # ----------------------------------------------------------------------
     def aggregate_book_data(self, file_path: str) -> 'BookData':
-        print(f"DEBUG: Versuche zu laden: {file_path}")
+        # 1. Versuch: Direkt aus der Datenbank laden
+        # Wir nutzen die Methode, die uns ein fertiges Objekt inkl. ID gibt
+        book_obj = BookData.load_by_path(file_path)
 
-        # 0. Existenzprüfung
-        if not os.path.exists(file_path):
-            print(f"❌ Datei nicht gefunden: {file_path}")
-            from book_data_model import BookData
-            return BookData(path=file_path, title="DATEI NICHT GEFUNDEN")
+        if book_obj:
+            print(f"DEBUG: Blitz-Ladung aus DB für ID {book_obj.id}")
+        else:
+            # 2. Versuch: Das Buch ist brandneu für das System
+            print(f"DEBUG: {file_path} unbekannt. Starte Full-Scan...")
+            book_obj = scan_single_book(file_path)
+            # 2. Live-Check: Existiert die Datei auf M://?
 
-        # 1. Metadaten aus der DATEI (EPUB) extrahieren
-        file_data = None
-        ext = file_path.lower().split('.')[-1]
-
-        if ext == 'epub':
-            file_data = get_epub_metadata(file_path)
-
-        if isinstance(file_data, tuple) or file_data is None:
-            file_data = derive_metadata_from_path(file_path)
-
-        # Falls es ein Dictionary war, in Objekt wandeln (BookData Klasse)
-        if isinstance(file_data, dict):
-            from book_data_model import BookData
-            file_data = BookData(**file_data)
-
-        file_data.path = file_path
-
-        # 2. Datenbank-Abfrage
-        db_data = get_db_metadata(file_path, db_path=self.db_path)
-
-        # Wenn wir Daten in der DB finden (db_data ist ein DICT)
-        if db_data:
-            print(f"DEBUG: DB-Daten gefunden, ergänze Objekt.")
-
-            # Sicherer Zugriff auf das Dictionary mit .get()
-            # Das verhindert den AttributeError
-            file_data.stars = db_data.get('stars') if db_data.get('stars') else file_data.stars
-            file_data.notes = db_data.get('notes') if db_data.get('notes') else file_data.notes
-
-            # Bei is_read reicht oft ein einfacher get, da 0/1 (False/True)
-            file_data.is_read = db_data.get('is_read', file_data.is_read)
-
-            # Klappentext
-            if db_data.get('description'):
-                file_data.description = db_data.get('description')
-
-            # Metadaten-Korrekturen aus der DB
-            file_data.title = db_data.get('title') if db_data.get('title') else file_data.title
-
-            # Achte hier auf 'authors' vs 'author' - je nachdem wie es in deiner DB heißt
-            db_author = db_data.get('authors') or db_data.get('author')
-            file_data.authors = db_author if db_author else file_data.authors
-
-        return file_data
+        if book_obj and not os.path.exists(book_obj.path):
+            # Den alten Pfad als Info retten, bevor wir ihn löschen
+            lost_path_note = f"[Info]: Ursprünglicher Pfad war verloren: {book_obj.path}"
+            if lost_path_note not in (book_obj.notes or ""):
+                book_obj.notes = (book_obj.notes or "") + f"\n{lost_path_note}"
+            book_obj.path =""
+            book_obj.save()
+        return book_obj
 
     # ----------------------------------------------------------------------
     # SUCHE & NAVIGATION
@@ -112,7 +80,7 @@ class BrowserModel:
     # SPEICHERN & DATEISYSTEM
     # ----------------------------------------------------------------------
     def save_book(self, data: BookData, old_path_from_controller: str) -> tuple[bool, str]:
-        """Koordiniert Umbenennung und DB-Update mit stabilem Anker."""
+        """Koordiniert Umbenennung des Files im Filesystem und stößt die DB-Update mit stabilem Anker an."""
         try:
             # Wir vertrauen dem Pfad, den der Controller uns als "Original" gibt
             old_path = os.path.normpath(old_path_from_controller)
@@ -126,6 +94,12 @@ class BrowserModel:
             for char in '<>:"/\\|?*': new_filename = new_filename.replace(char, '')
 
             new_path = os.path.join(os.path.dirname(old_path), new_filename)
+            print(f"DEBUG PATH COMPARE:")
+            print(f"  Old (Raw): {repr(old_path_from_controller)}")
+            print(f"  Old (Norm): {repr(old_path)}")
+            print(f"  New (Norm): {repr(new_path)}")
+            print(f"  Equal?    : {old_path == new_path}")
+
 
             # 2. Filesystem-Aktion
             if old_path != new_path:
@@ -133,27 +107,36 @@ class BrowserModel:
                     shutil.move(old_path, new_path)
                     # WICHTIG: Wir sagen der DB erst, dass das Buch jetzt anders heißt
                     # Bevor wir die restlichen Metadaten speichern!
-                    self.update_db_path(old_path, new_path)
+                    update_db_path(old_path, new_path)
                 data.path = new_path
 
-                # 3. DB-Aktion
-            # Hier liegt das Risiko: save_book_with_authors muss nun ein UPDATE machen.
-            # Falls diese Funktion intern immer noch über den Pfad sucht,
-            # findet sie jetzt den neuen Pfad, den wir gerade mit update_db_path gesetzt haben.
-            success = save_book_with_authors(data, db_path=self.db_path)
+            # 3. DB-Aktion
+            success = data.save()
 
-            return True, new_path
+            return success, new_path
         except Exception as e:
             print(f"Fehler im Model beim Speichern: {e}")
             return False, str(e)
 
-    def delete_book(self, file_path: str):
-        """Entfernt nur den DB-Eintrag."""
+    def delete_book(self, data: BookData, delete_file: bool = False) -> bool:
+        """Koordiniert das Löschen in DB und (optional) im Filesystem."""
         try:
-            with sqlite3.connect(self.db_path) as conn:
-                conn.execute("DELETE FROM books WHERE file_path = ?", (file_path,))
+            # 1. Schritt: Datenbank-Eintrag löschen (via BookData-Klasse)
+            db_success = data.delete()
+            # 2. Schritt: Optional die echte Datei löschen
+            if db_success and delete_file:
+                if os.path.exists(data.path):
+                    # Statt os.remove(data.path)
+                    from send2trash import send2trash
+                    send2trash(data.path)
+                    print(f"Datei gelöscht: {data.path}")
+                else:
+                    print(f"Hinweis: Datei nicht gefunden, wurde nur aus DB entfernt.")
+
+            return db_success
         except Exception as e:
-            print(f"DB-Löschfehler: {e}")
+            print(f"Fehler im Model beim Löschen: {e}")
+            return False
 
     def cleanup_temp_files(self):
         """Platzhalter für das Löschen von extrahierten Covern."""

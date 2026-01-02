@@ -230,10 +230,14 @@ def derive_metadata_from_path(file_path):
                 # Das Niveau (A1 etc.) als Keyword speichern
                 keywords.append(path_parts[i + 1])
 
-    return language, region, manual_genre, keywords
+    # Rückgabe als Dictionary für BookData.from_dict
+    return {
+        'language': language,
+        'region': region,
+        'genre': manual_genre,
+        'keywords': keywords
+    }
 
-
-import os
 
 
 def clean_file_names(root_directory):

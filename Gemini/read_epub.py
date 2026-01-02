@@ -11,10 +11,10 @@ import os
 import re
 import tempfile
 import html # Oben zu den Imports
-from typing import Optional, List, Tuple, Dict, Any
+from typing import Dict, Any
 
 try:
-    from book_data_model import BookData
+    from Apps.book_data import BookData
 except ImportError:
     # Falls das Modul beim Standalone-Test nicht gefunden wird
     BookData = None
@@ -262,7 +262,7 @@ def get_epub_metadata(epub_file_path) -> Dict[str, Any]:
                 'is_read': 0
             }
             # --- FINAL: Dictionary MAPPING AUF BOOKMETADATA-SCHLÜSSEL ---
-            return BookData(**data_content)
+            return data_content
 
 
     except zipfile.BadZipFile:

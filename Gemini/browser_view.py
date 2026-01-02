@@ -9,7 +9,6 @@ BESCHREIBUNG: Kümmert sich um die Darstellung in der Book_Browser App mit tkint
 import io
 import os
 import tkinter as tk
-from tkinter import ttk
 import fitz  # PyMuPDF
 from PIL import Image, ImageTk
 
@@ -207,7 +206,7 @@ class BrowserView:
         Durch die Anführungszeichen versteht Python das als "Versprechen",
         dass es diese Klasse irgendwo gibt, ohne sie sofort beim Laden der Datei validieren zu müssen.
         """
-        from book_data_model import BookData  # Lokaler Import, falls nötig
+        from Apps.book_data import BookData  # Lokaler Import, falls nötig
 
         # 1. Autoren-String parsen (Name & Name -> [('Vor', 'Nach'), ...])
         raw_authors = self.widgets['authors_raw'].get().strip()

@@ -27,7 +27,7 @@ sys.path.append(MODULES_DIR)
 try:
     from browser_view import BrowserView
     from browser_model import BrowserModel
-    from book_data_model import BookData
+    from book_data import BookData
 except ImportError as e:
     print(f"Fehler beim Modul-Import: {e}")
 
@@ -74,22 +74,6 @@ class BookBrowser:
     # ----------------------------------------------------------------------
     # 2. LADEN VON DATEN
     # ----------------------------------------------------------------------
-    def load_data(self, file_path):
-        """Koordiniert den Datenfluss vom Model zur View."""
-        if not file_path: return
-        # Normierung der Pfade: normpath = "/" für alle OS D:/Bücher/buch.epub
-        self.current_file_path = os.path.abspath(os.path.normpath(file_path))
-
-        # A. Model: Daten aggregieren
-        book_data = self.model.aggregate_book_data(self.current_file_path)
-        # B. Controller: Navigation tracken
-        if self.current_file_path in self.navigation_list:
-            self.current_index = self.navigation_list.index(self.current_file_path)
-        # C. View: Alles anzeigen
-        self.view.fill_widgets(book_data)
-        self.view.display_cover(book_data.image_path, self.current_file_path)
-        self.view.update_status(self.current_index + 1, len(self.navigation_list), self.current_file_path)
-
     def open_file(self):
         """Öffnet ein E-Book und lädt alle anderen Bücher im selben Verzeichnis in die Navigation."""
         path = filedialog.askopenfilename(filetypes=[("E-Books", "*.epub *.pdf")])
@@ -113,6 +97,22 @@ class BookBrowser:
         if path in self.navigation_list:
             self.current_index = self.navigation_list.index(path)
         self.load_data(path)
+
+    def load_data(self, file_path):
+        """Koordiniert den Datenfluss vom Model zur View."""
+        if not file_path: return
+        # Normierung der Pfade: normpath = "/" für alle OS D:/Bücher/buch.epub
+        self.current_file_path = os.path.abspath(os.path.normpath(file_path))
+
+        # A. Model: Daten aggregieren
+        self.current_book_data = self.model.aggregate_book_data(self.current_file_path)
+        # B. Controller: Navigation tracken
+        if self.current_file_path in self.navigation_list:
+            self.current_index = self.navigation_list.index(self.current_file_path)
+        # C. View: Alles anzeigen
+        self.view.fill_widgets(self.current_book_data)
+        self.view.display_cover(self.current_book_data.image_path, self.current_file_path)
+        self.view.update_status(self.current_index + 1, len(self.navigation_list), self.current_file_path)
 
     def load_mismatch_report(self):
         """Liest den Report ein und sammelt alle Fehlerzeilen pro Pfad."""
@@ -205,10 +205,27 @@ class BookBrowser:
     def save_data(self):
         """Sammelt Daten der View und lässt Model speichern."""
         updated_data = self.view.get_data_from_widgets()
+        print("--- DEBUG CONTROLLER: DATEN AUS WIDGETS ---")
+        print(f"Pfad (current): {repr(self.current_file_path)}")
+        print(f"Titel:         {repr(updated_data.title)}")
+        print(f"Sprache:       {repr(updated_data.language)}")
+        print(f"Manual Desc?:  {updated_data.is_manual_description}")
+        print(f"Autoren:       {repr(updated_data.authors)}")
+        desc_snippet = updated_data.description[:50].replace('\n', ' ') if updated_data.description else "LEER"
+        print(f"Beschreibung:  {repr(desc_snippet)}...")
+        print("-------------------------------------------")
+
+
         old_path = self.current_file_path
+        if self.current_book_data:
+            # DIE ID IST DER SCHLÜSSEL:
+            updated_data.id = self.current_book_data.id
+            if updated_data.description != self.current_book_data.description:
+                updated_data.is_manual_description = 1
+                print("DEBUG: is_manual_description wurde auf 1 gesetzt (Änderung erkannt)")
 
-        success, new_path = self.model.save_book(old_path, updated_data)
-
+        success, new_path = self.model.save_book(updated_data, old_path)
+        # Aktualisiert die Navigation Liste
         if success:
             if new_path != old_path:
                 if old_path in self.navigation_list:
@@ -223,23 +240,24 @@ class BookBrowser:
             messagebox.showerror("Fehler", "Speichern fehlgeschlagen.")
 
     def delete_current_book(self):
-        """Entfernt Buch aus DB und aktualisiert die Liste."""
-        if not self.current_file_path: return
+        if not self.current_book_data: return
 
         if messagebox.askyesno("Löschen", "Soll dieses Buch aus der Datenbank gelöscht werden?"):
-            self.model.delete_book(self.current_file_path)
+            # Wir übergeben das Objekt, damit das Model die ID hat
+            success = self.model.delete_book(self.current_book_data)
 
-            # Aus Navigation entfernen
-            if self.current_file_path in self.navigation_list:
-                self.navigation_list.remove(self.current_file_path)
+            if success:
+                path = self.current_book_data.path
+                if path in self.navigation_list:
+                    self.navigation_list.remove(path)
 
-            # Zum nächsten Buch springen
-            if self.navigation_list:
-                self.current_index = min(self.current_index, len(self.navigation_list) - 1)
-                self.load_data(self.navigation_list[self.current_index])
-            else:
-                messagebox.showinfo("Info", "Liste ist jetzt leer.")
-                # Hier könnte man die View leeren, falls nötig
+                if self.navigation_list:
+                    # Index korrigieren und neu laden
+                    self.current_index = min(self.current_index, len(self.navigation_list) - 1)
+                    self.load_current_book()  # Nutze deine bestehende Lade-Funktion
+                else:
+                    self.view.clear_fields()  # View leeren, wenn nichts mehr da ist
+                    messagebox.showinfo("Info", "Liste ist jetzt leer.")
 
     def on_close(self):
         """Aufräumen beim Beenden."""

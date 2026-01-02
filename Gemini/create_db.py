@@ -2,7 +2,7 @@
 DATEI: create_db.py
 VERSION: 1.2.0
 BESCHREIBUNG: Erstellt oder erweitert die Datenbank-Struktur.
-     book_data_model.py: Das zentrale Formular mit scanner_version.
+     book_data.py: Das zentrale Formular mit scanner_version.
      read_db_ebooks.py: Liest die Version und alle Daten sauber in das Objekt.
      save_db_ebooks.py: Schreibt die Version und Updates zurück.
      book_browser.py: Bereitet die Bookdaten aus Datei oder DB auf.
@@ -139,6 +139,7 @@ def update_database_structure():
         ("is_manual_description", "INTEGER DEFAULT 0"),  # Dein neues Schutz-Flag
         ("rating_ol", "REAL"),       # Bewertung von OpenLibrary
         ("ratings_count_ol", "INTEGER"),
+        ("work_id", "INTEGER"),
         ("api_source", "TEXT"),      # Dokumentiert, welche API zuletzt geliefert hat
         ("path", "TEXT"),            # hat in audiobooks gefehlt
         ("image_path", "TEXT")       # hat in books gefehlt
@@ -188,10 +189,6 @@ def update_book_paths():
         conn.rollback()
     finally:
         conn.close()
-
-
-import sqlite3
-
 
 def check_db_simple_entry(file_path):
     conn = sqlite3.connect(DB_PATH)
@@ -263,9 +260,9 @@ if __name__ == "__main__":
     # connection.close()
 
     # Aufruf für weitere Funktionen
-    # update_database_structure()
+    update_database_structure()
     # update_book_paths()
 
     # Direkte Datenbankabfrage
-    buch_pfad = r"D:\Bücher\Business\Kommunikation\Schlagfertigkeit\Christine Öttl & Gitte Härter — Das 1x1 der Schlagfertigkeit (2011).epub"
-    check_db_entry(buch_pfad)
+    # buch_pfad = r"D:\Bücher\Business\Biographien\Ashlee Vance — Elon Musk. Die Biografie des Gründers von Tesla, PayPal, SpaceX (2015).epub"
+    # check_db_entry(buch_pfad)
