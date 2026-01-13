@@ -1,4 +1,9 @@
-
+# Diese Liste definiert, was im "Genre"-Feld deines Browsers stehen darf.
+GENRE_WHITELIST = {
+    "Krimi", "Thriller", "Science Fiction", "Biographie",
+    "Liebesroman", "Spionage", "Horror", "Fantasy", "Roman",
+    "Fachbuch", "Sprache", "EasyReader", "Comic", "Sachbuch"
+}
 GENRE_MAPPING = {
     # ----------------------------------------------------
     # I. Fachbuch (Höchste Priorität für die spezifischen Kategorien)
@@ -117,6 +122,55 @@ def determine_single_genre(source_genres, categories, description):
     # III. Keine Region gefunden
     # ----------------------------------------------------
     return None
+
+
+def extract_genre_and_keywords(source_genres, categories, description):
+    """
+    Analysiert Texte und teilt Funde in ein Haupt-Genre und Keywords auf.
+    Gibt (str, set) zurück.
+    """
+    final_main_genre = "Unbekannt"
+    additional_keywords = set()
+
+    # 1. Such-Strings vorbereiten
+    valid_sources = [str(g).lower() for g in source_genres if g and isinstance(g, str)]
+    valid_cats = [str(c).lower() for c in categories if c and isinstance(c, str)]
+
+    # Wir gewichten die Quellen: Source-Genres sind oft präziser als die Beschreibung
+    search_text_primary = " ".join(valid_sources)
+    search_text_secondary = (description or "").lower() + " " + " ".join(valid_cats)
+
+    # 2. Mapping durchlaufen
+    for term, mapped_value in GENRE_MAPPING.items():
+        # Suche erst in Primärquellen, dann Sekundär
+        if term in search_text_primary or term in search_text_secondary:
+
+            # Extrahiere den Kernbegriff aus dem Mapping
+            # (z.B. "Fachbuch" aus "Fachbuch (IT/Digital)")
+            core_genre = mapped_value.split('(')[0].strip()
+
+            # A: Ist es ein Whitelist-Genre?
+            if core_genre in GENRE_WHITELIST:
+                if final_main_genre == "Unbekannt":
+                    final_main_genre = core_genre
+
+                # Die Details (z.B. "IT/Digital") packen wir IMMER in die Keywords
+                if '(' in mapped_value:
+                    detail = mapped_value.split('(')[1].replace(')', '')
+                    additional_keywords.update([d.strip() for d in detail.split('/')])
+                else:
+                    # Wenn es ein Whitelist-Genre ist, aber wir schon eins haben,
+                    # wird das zweite zum Keyword (z.B. ein "Krimi" der auch "Spionage" ist)
+                    if final_main_genre != core_genre:
+                        additional_keywords.add(core_genre)
+
+            # B: Kein Whitelist-Genre (z.B. "Action (Militär/Kampf)")
+            else:
+                # Alles in die Keywords
+                clean_val = mapped_value.replace('(', '/').replace(')', '').replace('/', ' ')
+                additional_keywords.update([v.strip() for v in clean_val.split()])
+
+    return final_main_genre, additional_keywords
 
 if __name__ == "__main__":
     print("--- Genre Mapping Tests ---")

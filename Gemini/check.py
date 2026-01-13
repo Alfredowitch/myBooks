@@ -5,46 +5,10 @@ BESCHREIBUNG: Kümmert sich um die Verarbeitung von Missmatch in Autoren oder Ti
               Alle Missmatches werden in eine Datenstruktur geschrieben und können ausgegeben werden.
               Das erzeugte txt-File kann mit dem Book-Browser geladen werden.
 """
-# file_utils.py (oder in deinem Hauptskript)
-import re
 import os
 
-
-# Die normalize_text Funktion bleibt unverändert, da sie großartig ist
-# für einen robusten, Fall-unabhängigen Textvergleich.
-def normalize_text(text: str) -> str:
-    """
-    Bereinigt Text (Titel/Autorennamen) für einen robusten, Fall-unabhängigen Vergleich.
-    """
-    if not isinstance(text, str):
-        return ""
-
-    text = text.lower()
-    # 1. Satzzeichen entfernen (insbesondere Punkte und Kommas)
-    text = re.sub(r'[.,;\'"]', '', text)
-    # 2. Bindestriche und extra Leerzeichen entfernen/ersetzen
-    text = re.sub(r'[\s\-]+', ' ', text).strip()
-    # 3. Einfache Akzent-Normalisierung
-    text = text.replace('ä', 'a').replace('ö', 'o').replace('ü', 'u')
-    text = text.replace('é', 'e').replace('á', 'a').replace('à', 'a').replace('ç', 'c')
-
-    # Optional: Trenne Untertitel ab (z.B. Titel: Untertitel)
-    text = text.split(':')[0].strip()
-
-    return text
-
-
-def normalize_author_tuple(author_tuple: tuple) -> tuple:
-    """Bereinigt die Strings innerhalb eines (Vorname, Nachname) Tupels."""
-    if not isinstance(author_tuple, tuple) or len(author_tuple) != 2:
-        return ("", "")
-
-    # Nutze die vorhandene normalize_text Funktion für die Reinigung
-    firstname_normalized = normalize_text(author_tuple[0])
-    lastname_normalized = normalize_text(author_tuple[1])
-
-    return (firstname_normalized, lastname_normalized)
-
+from Apps.book_data import BookData
+from Gemini.file_utils import normalize_text, normalize_author_tuple, sanitize_path
 
 def check_for_mismatch(file_path: str, file_title: str, epub_title: str,
                        file_authors: list, epub_authors: list,
@@ -71,12 +35,8 @@ def check_for_mismatch(file_path: str, file_title: str, epub_title: str,
     norm_file = [normalize_author_tuple(a) for a in file_authors]
     norm_epub = [normalize_author_tuple(a) for a in epub_authors]
 
-    # Sortieren der normalisierten Listen (komplette Tupel sortieren ist sicherer)
-    sorted_file = sorted(norm_file)
-    sorted_epub = sorted(norm_epub)
-
     # Vergleich
-    if sorted_file != sorted_epub:
+    if sorted(norm_file) != sorted(norm_epub):
         # Check: Sind es vielleicht dieselben Nachnamen, aber einer hat keinen Vornamen?
         # Das verhindert Mismatches bei "Oetker" vs "Alexander Oetker"
         file_lasts = sorted([a[1] for a in norm_file if a[1]])
@@ -104,7 +64,74 @@ def check_for_mismatch(file_path: str, file_title: str, epub_title: str,
     if mismatch:
         mismatch['filename'] = filename
         # NEU: Wir speichern den vollen, übergebenen Pfad ab
-        mismatch['full_path'] = os.path.abspath(file_path)
+        mismatch['full_path'] = sanitize_path(file_path)
         return mismatch
-
     return None
+
+
+class Book_Analyser:
+    @staticmethod
+    def check_and_cleanup_paths():
+        """
+        Prüft alle Einträge in der DB auf Existenz im Filesystem.
+        Verschiebt verwaiste Pfade in die Notizen und leert das Pfad-Feld.
+        Gibt einen Report über alle Änderungen zurück.
+        """
+        report = []
+        # Alle Bücher aus der DB laden
+        # Wir nutzen search(), um alle Objekte zu erhalten
+        all_books = BookData.search()
+
+        print(f"Starte Prüfung von {len(all_books)} Einträgen...")
+
+        updated_count = 0
+
+        for book in all_books:
+            # Falls das Feld bereits leer ist, überspringen
+            if not book.path:
+                continue
+
+            # Pfad-Existenz prüfen
+            # os.path.exists funktioniert dank deiner Normalisierung im __post_init__
+            if not os.path.exists(book.path):
+                old_path = book.path
+
+                # 1. Notiz erstellen / ergänzen
+                missing_note = f"File fehlt: {old_path}"
+                if book.notes:
+                    book.notes = f"{book.notes}\n{missing_note}"
+                else:
+                    book.notes = missing_note
+
+                # 2. Pfad-Feld leeren
+                book.path = ""
+
+                # 3. In den Report aufnehmen
+                report.append({
+                    "id": book.id,
+                    "title": book.title,
+                    "old_path": old_path,
+                    "status": "Pfad entfernt, in Notizen verschoben"
+                })
+
+                # 4. Objekt speichern
+                if book.save():
+                    updated_count += 1
+                else:
+                    print(f"Fehler beim Update von Buch ID {book.id}")
+
+        print(f"Prüfung abgeschlossen. {updated_count} Einträge korrigiert.")
+        return report
+
+    @staticmethod
+    def print_report(report):
+        """Gibt den Report sauber formatiert aus."""
+        if not report:
+            print("Alles in Ordnung. Keine verwaisten Pfade gefunden.")
+            return
+
+        print(f"{'ID':<5} | {'Titel':<30} | {'Status'}")
+        print("-" * 60)
+        for entry in report:
+            title_short = (entry['title'][:27] + '...') if len(entry['title']) > 30 else entry['title']
+            print(f"{entry['id']:<5} | {title_short:<30} | {entry['status']}")

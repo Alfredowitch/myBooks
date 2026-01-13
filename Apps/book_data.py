@@ -1,19 +1,22 @@
 """
 DATEI: book_data.py
-PROJEKT: MyBook-Management (v1.2.0)
+PROJEKT: MyBook-Management (v1.3.0)
 BESCHREIBUNG: Book_Data     rDas Herzstück.	Kennt das DB-Schema, verwaltet die ID und speichert sich selbst.
               Book_Scanner	Neue Dateien finden & Metadaten extrahieren.	Erstellt BookData-Objekte und ruft .save() auf.
               Book_Browser	GUI für Anzeige und manuelle Korrektur.	Ruft .load_by_path() auf und modifiziert Attribute.
-              Book_Analyser	Statistiken, Dubletten-Check, KI-Auswertung.	Liest BookData-Listen für Berechnungen
+              BookCleaner	Statistiken, Dubletten-Check, KI-Auswertung.	Liest BookData-Listen für Berechnungen
 """
 
 import sqlite3
-from dataclasses import dataclass, field, asdict
-from typing import Any, List, Optional, Dict  # Any ist das Wichtigste für deinen Fehler
+import unicodedata
+from dataclasses import dataclass, asdict, is_dataclass, field
+from typing import Any
+
+from Gemini.file_utils import DB_PATH
 
 @dataclass
 class BookData:
-    db_path = r'M://books.db'
+    db_path = DB_PATH
     id: int = 0
     path: str = ""
     work_id: int = 0
@@ -21,9 +24,9 @@ class BookData:
     # Hier definieren wir die Standard-Felder, damit sie 'echt' existieren:
     title: str = ""
     genre: str = ""
-    region: str = ""
     language: str = ""
-    keywords: list = field(default_factory=list)
+    keywords: set = field(default_factory=set)
+    regions: set = field(default_factory=set)
     series_name: str = ""
     series_number: str = ""
     isbn: str = ""
@@ -40,14 +43,23 @@ class BookData:
     is_read: int = 0
     is_complete: int = 0
     scanner_version: str = "1.2.0"
+    extension: str = ".epub"
+
+    @staticmethod
+    def normalize_path(p: str) -> str:
+        """Normalisiert Pfade auf den NFC-Standard (wichtig für Mac/Windows Kompatibilität)."""
+        if not isinstance(p, str):
+            return p
+        return unicodedata.normalize('NFC', p)
 
     @classmethod
     def load_by_path(cls, file_path):
+        clean_path = cls.normalize_path(file_path)
         conn = sqlite3.connect(cls.db_path)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
 
-        cursor.execute("SELECT * FROM books WHERE path = ?", (file_path,))
+        cursor.execute("SELECT * FROM books WHERE path = ?", (clean_path,))
         row = cursor.fetchone()
 
         if not row:
@@ -72,10 +84,10 @@ class BookData:
         if 'keywords' in clean_data and isinstance(clean_data['keywords'], str):
             kw_string = clean_data['keywords'].strip()
             if kw_string:
-                # Zerlegen am Komma und Leerzeichen entfernen
-                clean_data['keywords'] = [k.strip() for k in kw_string.split(',')]
+                # Wir machen direkt ein SET daraus
+                clean_data['keywords'] = {k.strip() for k in kw_string.split(',')}
             else:
-                clean_data['keywords'] = []
+                clean_data['keywords'] = set()
         # 4. Autoren manuell dazu, da sie in der DB ja aus einer anderen Tabelle kommen
         clean_data['authors'] = authors_list
         return cls(**clean_data)
@@ -89,26 +101,225 @@ class BookData:
         filtered_data = {k: v for k, v in data.items() if k in valid_fields}
         return cls(**filtered_data)
 
+    @classmethod
+    def search(cls, title_term="", author_term=""):
+        """Sucht Bücher und gibt eine Liste von BookData-Objekten zurück."""
+        conn = sqlite3.connect(DB_PATH)
+        # SQL-Query (angepasst auf deine Struktur)
+        sql_query = """
+                SELECT DISTINCT b.*
+                FROM books b
+                LEFT JOIN book_authors ba ON b.id = ba.book_id
+                LEFT JOIN authors a ON ba.author_id = a.id
+                WHERE (?1 = '' OR b.title LIKE '%' || ?1 || '%')
+                  AND (?2 = '' OR a.lastname LIKE '%' || ?2 || '%' OR a.firstname LIKE '%' || ?2 || '%')
+            """
+        results = []
+        try:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute(sql_query, (title_term, author_term))
+            rows = cursor.fetchall()
+
+            for row in rows:
+                # Wir nutzen deine vorhandene Logik: Dict aus Row erstellen
+                data = dict(row)
+                # Autoren für dieses Buch laden
+                cursor.execute("""
+                        SELECT a.firstname, a.lastname FROM authors a
+                        JOIN book_authors ba ON a.id = ba.author_id
+                        WHERE ba.book_id = ?""", (data['id'],))
+                data['authors'] = [(r[0], r[1]) for r in cursor.fetchall()]
+
+                # Wir nutzen from_dict oder den Constructor, um das Objekt zu bauen
+                # Zuerst filtern wir wieder die erlaubten Keys
+                allowed_keys = cls.__annotations__.keys()
+                clean_data = {k: v for k, v in data.items() if k in allowed_keys}
+
+                # Keywords Fix (String -> Liste), falls in DB als String
+                if 'keywords' in clean_data and isinstance(clean_data['keywords'], str):
+                    kw = clean_data['keywords'].strip()
+                    clean_data['keywords'] = [k.strip() for k in kw.split(',')] if kw else []
+                results.append(cls(**clean_data))
+
+        except sqlite3.Error as e:
+            print(f"Fehler bei Suche: {e}")
+        finally:
+            if conn:
+                conn.close()
+        return results
+
+    @classmethod
+    def search_sql(cls, sql_query: str, params: tuple = ()):
+        """
+        Führt ein beliebiges SQL-Statement aus und gibt eine Liste
+        von BookData-Objekten zurück.
+        """
+        conn = sqlite3.connect(cls.db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        results = []
+        try:
+            cursor.execute(sql_query, params)
+            rows = cursor.fetchall()
+
+            # Wir holen die erlaubten Felder der Klasse
+            allowed_keys = cls.__annotations__.keys()
+
+            for row in rows:
+                data = dict(row)
+                # Nur die Felder nehmen, die im SQL-Ergebnis UND in der Klasse sind
+                clean_data = {k: v for k, v in data.items() if k in allowed_keys}
+
+                # Spezialfall Keywords (String -> Set)
+                if 'keywords' in clean_data and isinstance(clean_data['keywords'], str):
+                    kw = clean_data['keywords'].strip()
+                    clean_data['keywords'] = {k.strip() for k in kw.split(',')} if kw else set()
+
+                # Wir erstellen das Objekt (unvollständige Felder werden durch Defaults ersetzt)
+                results.append(cls(**clean_data))
+        except sqlite3.Error as e:
+            print(f"Fehler bei search_sql: {e}")
+        finally:
+            conn.close()
+        return results
+
+    @classmethod
+    def update_file_path(cls, old_path, new_path):
+        # 1. Pfade normalisieren (Sicherheit zuerst!)
+        old_path = cls.normalize_path(old_path)
+        new_path = cls.normalize_path(new_path)
+
+        conn = sqlite3.connect(DB_PATH)
+        try:
+            cursor = conn.cursor()
+
+            # 2. UPDATE ausführen
+            cursor.execute("UPDATE books SET path = ? WHERE path = ?", (new_path, old_path))
+
+            if cursor.rowcount == 0:
+                # ... dein (sehr guter!) Fehler-Check mit dem LIKE %filename ...
+                # (hier weggelassen für die Übersicht)
+                return False
+            else:
+                conn.commit()
+                print(f"DEBUG: Update erfolgreich.")
+
+        except sqlite3.Error as e:
+            print(f"Datenbankfehler: {e}")
+            return False
+        finally:
+            conn.close()
+
+    # __init__ wird bei Datenklassen ja im Hintergrund automatisch erledigt.
+    # Aber wir müssen uns danach um die Normalisierung des Pfadnamen kümmern.
+    def __post_init__(self):
+        """Wird sofort nach der Erstellung des Objekts aufgerufen."""
+        # Wir nutzen unsere statische Methode, um den Pfad zu säubern
+        self.path = self.normalize_path(self.path)
+        # Falls keywords als Liste reingekommen ist (z.B. aus JSON),
+        # wandeln wir es sofort in ein Set um.
+        if isinstance(self.keywords, list):
+            self.keywords = set(self.keywords)
+
+        if isinstance(self.regions, list):
+            self.regions = set(self.regions)
+
+    def is_field_empty(self, field_name: str, value: Any) -> bool:
+        """
+        Zentrale Logik: Prüft, ob ein Wert für ein bestimmtes Feld als 'leer' gilt.
+        Berücksichtigt Strings, Listen, Zahlen und deine Platzhalter.
+        """
+        if value is None:
+            return True
+
+        # 1. Strings (inkl. Platzhalter-Texte)
+        if isinstance(value, str):
+            v = value.strip()
+            return v == "" or v.lower() == "none" or v in ["Unbekannt", "Unbekannter Titel", "Kein Autor"]
+
+        # 2. Listen / Dicts (inkl. Autoren-Tupel-Check)
+        if isinstance(value, (list, tuple, dict, set)):
+            if not value:
+                return True
+            if field_name == 'authors' and isinstance(value, list):
+                # Checkt ob nur Platzhalter-Tupel in der Liste sind
+                return all(a in {("", "Unbekannt"), ("", "Kein Autor"), ()} for a in value)
+            return False
+
+        # 3. Zahlen (Jahr 0 oder Rating 0 ist 'leer')
+        if isinstance(value, (int, float)):
+            return value == 0
+
+        return False
 
     def get_if_not_empty(self, field_name: str) -> Any:
         """
-        Gibt den Wert des Feldes zurück, wenn es NICHT leer ist.
-        Ansonsten wird None zurückgegeben.
+        Nutzt is_field_empty, um zu entscheiden, ob der Wert zurückgegeben
+        oder durch None ersetzt wird.
         """
         value = getattr(self, field_name, None)
+        if self.is_field_empty(field_name, value):
+            return None
+        return value
 
-        # Die eigentliche Logik, was als "leer" gilt
-        is_empty = False
-        if value is None:
-            is_empty = True
-        elif isinstance(value, str) and not value.strip():
-            is_empty = True
-        elif isinstance(value, (list, tuple, dict)) and len(value) == 0:
-            is_empty = True
-        return None if is_empty else value
+    def merge_with(self, other_metadata: 'BookData'):
+        """
+        Führt Metadaten zusammen. Schützt kritische Felder und sammelt
+        Kategorien in Keywords.
+        """
+        if not other_metadata:
+            return
+
+        # Felder, die die Identität oder User-Eingaben schützen
+        protected_fields = ['id', 'db_id', 'is_read', 'scanner_version', 'stars', 'notes']
+
+        # Wir wandeln das andere Objekt in ein Dictionary um
+        if is_dataclass(other_metadata):
+            other_dict = asdict(other_metadata)
+        else:
+            # Falls es ein normales Objekt oder Dict ist
+            other_dict = other_metadata.__dict__ if hasattr(other_metadata, '__dict__') else other_metadata
+
+        for field_name, other_value in other_dict.items():
+            # 1. Schutz-Check
+            if field_name in protected_fields:
+                current_val = getattr(self, field_name, None)
+                if not self.is_field_empty(field_name, current_val):
+                    continue
+
+            # 2. Wert übernehmen, wenn das eigene Feld leer ist
+            current_value = getattr(self, field_name, None)
+            if self.is_field_empty(field_name, current_value):
+                if not self.is_field_empty(field_name, other_value):
+                    setattr(self, field_name, other_value)
+
+            # SPEZIALFALL: image_path (Cover-Pfad immer von Quelle übernehmen)
+            if field_name == 'image_path' and other_value is not None:
+                setattr(self, field_name, other_value)
+
+        # --- LOGIK FÜR DAS GENRE-BACKUP ---
+        if self.is_field_empty("genre", self.genre):
+            # 1. Versuch: genre_epub nutzen (falls vorhanden)
+            if hasattr(other_metadata, 'genre_epub') and not self.is_field_empty("genre", other_metadata.genre_epub):
+                self.genre = other_metadata.genre_epub
+            # 2. Versuch: Erste Kategorie nutzen
+            elif hasattr(other_metadata, 'categories') and other_metadata.categories:
+                self.genre = other_metadata.categories[0]
+
+        # --- DATEN-SAMMLER: Kategorien -> Keywords ---
+        if hasattr(other_metadata, 'categories') and other_metadata.categories:
+            for cat in other_metadata.categories:
+                if cat not in self.keywords:
+                    self.keywords.add(cat)
+
+        if hasattr(other_metadata, 'genre_epub') and other_metadata.genre_epub:
+            if other_metadata.genre_epub not in self.keywords:
+                self.keywords.add(other_metadata.genre_epub)
 
     def save(self):
         """Das Objekt speichert sich selbst in die Datenbank – mit Typ-Korrektur."""
+        self.path = self.normalize_path(self.path)
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
 
@@ -117,11 +328,18 @@ class BookData:
         db_cols = [row[1] for row in cursor.fetchall()]
 
         current_data = self.to_dict()
-        # Keywords für DB konvertieren: Liste -> String
-        if 'keywords' in current_data and isinstance(current_data['keywords'], list):
-            current_data['keywords'] = ", ".join(current_data['keywords'])
+        # Typ-Korrektur für die Datenbank: Sets oder Listen zu Strings konvertieren
+        for field in ['keywords', 'regions']:
+            if field in current_data:
+                val = current_data[field]
+                # Wir prüfen auf Set ODER Liste
+                if isinstance(val, (set, list)):
+                    # Wir sortieren für eine saubere Optik in der DB
+                    current_data[field] = ", ".join(sorted(list(val)))
+                elif val is None:
+                    current_data[field] = ""
 
-        ignored = {'authors', 'image_path'}  # keywords jetzt nicht mehr ignorieren, da sie in die DB sollen
+        ignored = {'authors', 'image_path', 'extension'}  # keywords jetzt nicht mehr ignorieren, da sie in die DB sollen
         mismatch = [k for k in current_data.keys() if k not in db_cols and k not in ignored]
 
         if mismatch:
@@ -199,3 +417,114 @@ class BookData:
     def to_dict(self):
         """Hilfsmethode für SQL - nutzt jetzt die festen Felder der Dataclass."""
         return asdict(self)
+
+    @classmethod
+    def fix_path_ext(cls, old_path, new_path):
+        """Ändert den Pfad eines Buches in der DB, wenn die Endung korrigiert wurde."""
+        old_path = cls.normalize_path(old_path)
+        new_path = cls.normalize_path(new_path)
+
+        conn = sqlite3.connect(cls.db_path)
+        try:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE books SET path = ? WHERE path = ?", (new_path, old_path))
+            conn.commit()
+            return cursor.rowcount > 0
+        except sqlite3.Error as e:
+            print(f"DB-Fehler bei Pfad-Fix: {e}")
+            return False
+        finally:
+            conn.close()
+
+
+    @classmethod
+    def vacuum(cls):
+        """
+        Komprimiert die Datenbank und optimiert die Speicherstruktur.
+        Sollte nach großen Lösch- oder Update-Aktionen (wie dem Repair-Scan)
+        aufgerufen werden.
+        """
+        import time
+        print(f"--- STARTE DATENBANK-OPTIMIERUNG (VACUUM) ---")
+        start_time = time.time()
+
+        conn = sqlite3.connect(cls.db_path)
+        try:
+            # VACUUM kann nicht innerhalb einer Transaktion ausgeführt werden,
+            # daher stellen wir sicher, dass autocommit aktiv ist oder schließen die Verbindung kurz.
+            conn.isolation_level = None
+            cursor = conn.cursor()
+
+            # 1. Größe vor dem Vacuum
+            cursor.execute("PRAGMA page_count")
+            pages_before = cursor.fetchone()[0]
+            cursor.execute("PRAGMA page_size")
+            page_size = cursor.fetchone()[0]
+            size_before_mb = (pages_before * page_size) / (1024 * 1024)
+
+            print(f"Aktuelle Größe: {size_before_mb:.2f} MB. Bitte warten...")
+
+            # Der eigentliche Befehl
+            cursor.execute("VACUUM")
+
+            # 2. Größe nach dem Vacuum
+            cursor.execute("PRAGMA page_count")
+            pages_after = cursor.fetchone()[0]
+            size_after_mb = (pages_after * page_size) / (1024 * 1024)
+
+            duration = time.time() - start_time
+            print(f"✅ Optimierung abgeschlossen ({duration:.1f}s).")
+            print(f"Neue Größe: {size_after_mb:.2f} MB (Ersparnis: {size_before_mb - size_after_mb:.2f} MB).")
+
+        except sqlite3.Error as e:
+            print(f"❌ Fehler beim Vacuum: {e}")
+        finally:
+            conn.close()
+
+    @classmethod
+    def get_book_counts_per_folder(cls, base_filter=None):
+        """
+        Zählt Bücher pro Ordner innerhalb eines base_filter Pfades.
+        Nutzt die Klassen-Logik, bleibt aber speichereffizient.
+        """
+        folder_counts = {}
+
+        # SQL-Teil: Wir holen nur den Pfad.
+        # Wenn ein Filter gesetzt ist, schränken wir die Suche direkt in der DB ein.
+        if base_filter:
+            sql_filter = base_filter.replace('\\', '/') + '%'
+            sql = "SELECT path FROM books WHERE path LIKE ?"
+            # WICHTIG: Wir nutzen hier eine Methode, die idealerweise einen Generator liefert
+            # Falls search_sql fetchall() nutzt, ist das hier der Flaschenhals bei 100k Einträgen.
+            results = cls.search_sql(sql, (sql_filter,))
+        else:
+            results = cls.search_sql("SELECT path FROM books")
+
+        for book in results:
+            # Falls search_sql Objekte zurückgibt, greifen wir auf .path zu, sonst auf Index [0]
+            full_path = getattr(book, 'path', book[0] if isinstance(book, (list, tuple)) else None)
+
+            if full_path:
+                # Schnelles String-Splitting statt os.path.dirname
+                norm_path = full_path.replace('\\', '/')
+                folder = norm_path.rsplit('/', 1)[0]
+
+                folder_counts[folder] = folder_counts.get(folder, 0) + 1
+
+        return folder_counts
+
+
+    @classmethod
+    def get_all_paths_in_folder(cls, folder_path):
+        """Gibt eine Liste aller Pfade zurück, die in der DB unter diesem Ordner liegen."""
+        # Wir nutzen ein LIKE Statement, um alle Unterpfade zu finden
+        # Wir normalisieren die Slashes, damit der Vergleich klappt
+        search_path = folder_path.replace('\\', '/')
+        if not search_path.endswith('/'):
+            search_path += '/'
+
+        sql = "SELECT path FROM books WHERE path LIKE ?"
+        results = cls.search_sql(sql, (search_path + '%',))
+
+        # search_sql liefert oft Objekte zurück, wir brauchen nur die Strings
+        return [book.path for book in results]

@@ -26,6 +26,9 @@ class BrowserView:
 
         self._create_main_layout()
 
+    # ----------------------------------------------------------------------
+    # 0. Create Form
+    # ----------------------------------------------------------------------
     def _create_main_layout(self):
         """Erstellt das Grundgerüst der Widgets."""
         self.main_frame = tk.Frame(self.win, padx=10, pady=10)
@@ -61,10 +64,11 @@ class BrowserView:
         fields = [
             ('Autoren', 'authors_raw', 'entry'),
             ('Titel', 'title', 'entry'),
+            ('Dateiendung', 'extension', 'entry'),
             ('Serienname', 'series_name', 'entry'),
             ('Seriennr.', 'series_number', 'entry'),
             ('Genre', 'genre', 'entry'),
-            ('Region', 'region', 'entry'),
+            ('Regionen', 'regions', 'entry'),
             ('Sprache', 'language', 'entry'),
             ('Jahr', 'year', 'entry'),
             ('ISBN', 'isbn', 'entry'),
@@ -117,49 +121,62 @@ class BrowserView:
             side="left", padx=(10, 0))
         tk.Button(nav_container, text="Beenden", width=10, command=controller.on_close).pack(side="right", padx=5)
 
+    # ----------------------------------------------------------------------
+    # 1. Display Coverbild
+    # ----------------------------------------------------------------------
     def display_cover(self, image_path, current_file_path):
-        """Lädt Bilddatei oder extrahiert Cover aus PDF."""
+        """Lädt Bilddatei oder extrahiert Cover aus PDF/EPUB via fitz."""
         self.cover_label.config(image='', text='Lädt...')
-        # 1. WICHTIG: Text löschen und Größe auf 0 setzen, damit Pixel-Messung aktiv wird
-        # self.cover_label.config(image='', text='', width=0, height=0)
         self.tk_img = None
         max_size = (310, 420)
 
         try:
-            # Fall A: Bilddatei (EPUB/Mobi Extrakt)
+            # Pfad-Normalisierung für Windows
+            if current_file_path:
+                current_file_path = os.path.abspath(os.path.normpath(current_file_path))
+
+            # Fall A: Existierendes Bild (JPG/PNG)
             if image_path and os.path.exists(image_path) and not image_path.lower().endswith('.pdf'):
                 img = Image.open(image_path)
                 img.thumbnail(max_size, Image.Resampling.LANCZOS)
                 self.tk_img = ImageTk.PhotoImage(img)
 
-            # Fall B: PDF Extraktion
-            elif current_file_path and current_file_path.lower().endswith('.pdf'):
-                doc = fitz.open(current_file_path)
-                page = doc.load_page(0)
-                pix = page.get_pixmap(matrix=fitz.Matrix(3.0, 3.0))
-                img = Image.open(io.BytesIO(pix.tobytes("png")))
-                img = img.resize(max_size, Image.Resampling.LANCZOS)
-                self.tk_img = ImageTk.PhotoImage(img)
-                doc.close()
+            # Fall B: Extraktion aus Buchdatei (PDF oder EPUB)
+            elif current_file_path and os.path.exists(current_file_path):
+                ext = current_file_path.lower()
+                if ext.endswith('.pdf') or ext.endswith('.epub') or ext.endswith('.mobi'):
+                    doc = fitz.open(current_file_path)
+                    # Erste Seite laden (bei EPUBs oft das Cover)
+                    page = doc.load_page(0)
+                    pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0))
+                    img_data = pix.tobytes("png")
+                    img = Image.open(io.BytesIO(img_data))
+                    img.thumbnail(max_size, Image.Resampling.LANCZOS)
+                    self.tk_img = ImageTk.PhotoImage(img)
+                    doc.close()
 
             if self.tk_img:
+                # WICHTIG: width=0, height=0 damit das Bild die Größe bestimmt
                 self.cover_label.config(image=self.tk_img, text='', width=0, height=0)
-                self.cover_label.image = self.tk_img  # Referenz halten
+                self.cover_label.image = self.tk_img
             else:
                 self.cover_label.config(text="Kein Cover verfügbar", width=40, height=20)
-        except Exception as e:
-            print(f"Cover-Fehler: {e}")
-            self.cover_label.config(text="Fehler beim Laden")
 
+        except Exception as e:
+            print(f"❌ Cover-Fehler für {os.path.basename(current_file_path) if current_file_path else '???'}: {e}")
+            self.cover_label.config(text="Fehler beim Laden", width=40, height=20)
+
+    # ----------------------------------------------------------------------
+    # 2. Füller der Form
+    # ----------------------------------------------------------------------
     def fill_widgets(self, data):
         """Füllt die Maske mit Daten aus einem BookData-Objekt."""
-        # Einfache Entry-Felder (Mapping von Widget-Key zu BookData-Attribut)
+        # 1. Grund-Mapping erstellen
         mapping = {
             'title': data.title,
             'series_name': data.series_name,
             'series_number': data.series_number,
             'genre': data.genre,
-            'region': data.region,
             'language': data.language,
             'year': data.year,
             'isbn': data.isbn,
@@ -168,20 +185,45 @@ class BrowserView:
             'stars': data.stars
         }
 
+        # 2. Extension-Logik (Robustes Befüllen)
+        ext = getattr(data, 'extension', None)
+        if not ext and data.path:
+            ext = os.path.splitext(data.path)[1]
+        clean_ext = ext.lstrip('.') if ext else "epub"
+
+        # Extension sofort setzen
+        if 'extension' in self.widgets:
+            self.widgets['extension'].delete(0, tk.END)
+            self.widgets['extension'].insert(0, clean_ext.lower())
+
+        # 3. Einfache Felder loopen
         for key, value in mapping.items():
             if key in self.widgets:
                 self.widgets[key].delete(0, tk.END)
                 self.widgets[key].insert(0, str(value) if value is not None else "")
 
-        # Autoren spezial
+        # 1. Einfache Felder (mapping ohne regions und keywords!)
+        for key, value in mapping.items():
+            if key in self.widgets:
+                self.widgets[key].delete(0, tk.END)
+                self.widgets[key].insert(0, str(value) if value is not None else "")
+        # 2. Helfer für Collections (Sets/Listen)
+        def format_collection(col):
+            if isinstance(col, (set, list)):
+                return ", ".join(sorted(list(col))) if col else ""
+            return str(col) if col else ""
+        # 3. Regions spezial (jetzt mit schöner Formatierung)
+        if 'regions' in self.widgets:
+            self.widgets['regions'].delete(0, tk.END)
+            self.widgets['regions'].insert(0, format_collection(data.regions))
+        # 4. Keywords spezial (erweitert für Sets)
+        kw_str = format_collection(data.keywords)
+        self.widgets['keywords'].delete(0, tk.END)
+        self.widgets['keywords'].insert(0, kw_str)
+        # 5. Autoren spezial
         author_str = " & ".join([f"{fn} {ln}".strip() for fn, ln in data.authors]) if data.authors else ""
         self.widgets['authors_raw'].delete(0, tk.END)
         self.widgets['authors_raw'].insert(0, author_str)
-
-        # Keywords spezial
-        kw_str = ", ".join(data.keywords) if isinstance(data.keywords, list) else (data.keywords or "")
-        self.widgets['keywords'].delete(0, tk.END)
-        self.widgets['keywords'].insert(0, kw_str)
 
         # Checkbutton
         if 'is_read_var' in self.vars:
@@ -192,14 +234,25 @@ class BrowserView:
             self.widgets[key].delete('1.0', tk.END)
             self.widgets[key].insert('1.0', str(value) if value else "")
 
-    def update_status(self, current, total, path):
-        """Aktualisiert Zähler und Pfadanzeige."""
+    def update_status(self, current, total, path, is_magic=False):
+        """Aktualisiert Zähler und Pfadanzeige mit Farbsignal bei Magic-Heilung."""
         self.pos_label.config(text=f"{current} von {total}")
         self.path_entry.config(state='normal')
         self.path_entry.delete(0, tk.END)
         self.path_entry.insert(0, path)
-        self.path_entry.config(state='readonly')
 
+        if is_magic:
+            # Kräftiges Orange/Rot für den Text, helles Gelb für den Hintergrund
+            self.path_entry.config(fg="red", bg="#fff9c4")
+            # Kleiner Trick: Wir setzen den Fokus kurz drauf, damit man es sieht
+        else:
+            # Standardfarben (dein Blau auf Grau)
+            self.path_entry.config(fg="blue", bg="#f0f0f0")
+
+        self.path_entry.config(state='readonly')
+    # ----------------------------------------------------------------------
+    # 3. Auslesen der Form
+    # ----------------------------------------------------------------------
     def get_data_from_widgets(self) -> 'BookData':
         """
         Sammelt alle Daten aus den Widgets ein und gibt ein BookData-Objekt zurück.
@@ -222,22 +275,29 @@ class BrowserView:
                     parsed_authors.append(("", parts[0]))
 
         # 2. Keywords-String parsen (Wort, Wort -> [Wort, Wort])
-        raw_keywords = self.widgets['keywords'].get().strip()
-        keywords_list = [k.strip() for k in raw_keywords.split(',') if k.strip()]
+        def string_to_set(widget_key):
+            raw = self.widgets[widget_key].get().strip()
+            if not raw or raw == "set()":
+                return set()
+            return {item.strip() for item in raw.split(',') if item.strip()}
+
+        current_keywords = string_to_set('keywords')
+        current_regions = string_to_set('regions')
 
         # 3. BookData Objekt befüllen
         data = BookData(
             path=self.path_entry.get(),  # Wird vom Controller überschrieben, falls nötig
             authors=parsed_authors,
             title=self.widgets['title'].get().strip(),
+            extension=self.widgets['extension'].get().strip(),
             series_name=self.widgets['series_name'].get().strip() or None,
             series_number=self.widgets['series_number'].get().strip() or None,
             genre=self.widgets['genre'].get().strip() or None,
-            region=self.widgets['region'].get().strip() or None,
+            regions=current_regions,
             language=self.widgets['language'].get().strip() or None,
             year=self.widgets['year'].get().strip() or None,
             isbn=self.widgets['isbn'].get().strip() or None,
-            keywords=keywords_list,
+            keywords=current_keywords,
             average_rating=self.widgets['average_rating'].get().strip() or None,
             ratings_count=self.widgets['ratings_count'].get().strip() or None,
             stars=self.widgets['stars'].get().strip() or None,
@@ -247,7 +307,9 @@ class BrowserView:
         )
 
         return data
-
+    # ----------------------------------------------------------------------
+    # 4. GUI Elemente für Search
+    # ----------------------------------------------------------------------
     def show_search_popup(self, search_callback):
         """Erstellt ein Toplevel-Fenster für die Suche."""
         search_window = tk.Toplevel(self.win)

@@ -1,12 +1,15 @@
 """
 DATEI: google_books.py
-PROJEKT: MyBook-Management (v1.2.0)
+PROJEKT: MyBook-Management (v1.3.0)
 BESCHREIBUNG: Kümmert sich um den API Zugriff auf Google-Books mit ISBN (aus epub).
               Liest Rating, Rating-count und Description.
 """
 import requests
 import re
 from typing import Optional, Dict, Any, List
+from tqdm import tqdm
+
+from Gemini.file_utils import clean_description
 
 # Basis-URL für die Google Books API
 SEARCH_URL = "https://www.googleapis.com/books/v1/volumes"
@@ -48,14 +51,12 @@ def _query_google_books(query: str, max_results: int = 1, lang: Optional[str] = 
         if data.get('totalItems', 0) > 0 and data.get('items'):
             return data['items'][0]
     except requests.exceptions.RequestException as e:
-        print(f"  WARN: Google Books API-Fehler ({query}): {e}")
+        tqdm.write(f"  WARN: Google Books API-Fehler ({query}): {e}")
     except Exception as e:
-        print(f"  WARN: Allgemeiner Google Books Fehler: {e}")
+        tqdm.write(f"  WARN: Allgemeiner Google Books Fehler: {e}")
 
     return None
 
-
-# --- Haupt-API-Funktion für die Aggregation ---
 
 def get_book_data_by_isbn(isbn: str) -> Dict[str, Any]:
     """
@@ -70,7 +71,7 @@ def get_book_data_by_isbn(isbn: str) -> Dict[str, Any]:
     if len(isbn_clean) not in (10, 13):
         return {}
 
-    print(f"  -> Google Books Suche für ISBN: {isbn_clean}")
+    tqdm.write(f"  -> Google Books Suche für ISBN: {isbn_clean}")
 
     item = _query_google_books(query=f"isbn:{isbn_clean}", max_results=1)
 
@@ -115,7 +116,7 @@ def search_isbn_only(title: str, author_lastname: str, lang: Optional[str] = Non
         f"{title} {author_lastname}"  # Unscharfe Suche
     ]
 
-    print(f"  -> Suche ISBN via Google Books: '{title}' von {author_lastname}")
+    tqdm.write(f"  -> Suche ISBN via Google Books: '{title}' von {author_lastname}")
 
     for query in queries:
         item = _query_google_books(query=query, max_results=5, lang=lang)
@@ -129,6 +130,52 @@ def search_isbn_only(title: str, author_lastname: str, lang: Optional[str] = Non
 
     return None
 
+# --- Haupt-API-Funktion für die Aggregation ---
+def enrich_from_google_books(book_data):
+    """
+    Nutzt die Google Books API, um das BookData-Objekt zu vervollständigen.
+    """
+    # 1. ISBN-Suche, falls diese noch fehlt (Voraussetzung für get_book_data_by_isbn)
+    if not book_data.isbn and book_data.title:
+        # Wir nehmen den Nachnamen des ersten Autors für die Suche
+        last_name = book_data.authors[0][1] if book_data.authors else ""
+        if last_name != "Unbekannt":
+            found_isbn = search_isbn_only(book_data.title, last_name, lang=book_data.language)
+            if found_isbn:
+                book_data.isbn = found_isbn
+
+    # 2. Detail-Abfrage mit (neuer oder alter) ISBN
+    if book_data.isbn:
+        api_data = get_book_data_by_isbn(book_data.isbn)
+        if not api_data or not isinstance(api_data, dict):
+            return book_data
+
+        # Jahr (Google ist hier meist sehr genau)
+        if not book_data.year:
+            book_data.year = api_data.get('year')
+
+        # Beschreibung (nur wenn keine manuelle Beschreibung vorliegt)
+        if not getattr(book_data, 'is_manual_description', 0):
+            new_desc = api_data.get('description')
+            if new_desc and isinstance(new_desc, str):
+                # Hier nutzen wir deine clean_description Funktion aus dem Scan-Modul
+                book_data.description = clean_description(new_desc)
+            elif not book_data.description:
+                book_data.description = ""  # Fallback auf leeren String
+
+        # Ratings
+        book_data.average_rating = api_data.get('average_rating') or book_data.average_rating
+        book_data.ratings_count = api_data.get('ratings_count') or book_data.ratings_count
+
+        # WICHTIG: Kategorien für das spätere Mapping zwischenspeichern
+        # Google liefert Listen wie ["Fiction / Mystery & Detective / General"]
+        if api_data.get('keywords'):
+            # Wir speichern diese in einem temporären Attribut für den Single-Scan Schritt D
+            if not hasattr(book_data, 'categories'):
+                book_data.categories = []
+            book_data.categories.extend(api_data.get('keywords'))
+    # Am Ende geben wir das Objekt (verändert oder unverändert) zurück
+    return book_data
 
 # -------------------------------------------------------------------------
 if __name__ == "__main__":
@@ -142,4 +189,4 @@ if __name__ == "__main__":
 
     # Beispiel für die reine ISBN-Suche
     found_isbn = search_isbn_only(title="Rue de Paradis", author_lastname="Oetker")
-    print(f"Gefundene ISBN: {found_isbn}")
+    tqdm.write(f"Gefundene ISBN: {found_isbn}")

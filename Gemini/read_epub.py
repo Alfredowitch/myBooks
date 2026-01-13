@@ -1,20 +1,24 @@
 """
 DATEI: read_epub.py
-PROJEKT: MyBook-Management (v1.2.0)
+PROJEKT: MyBook-Management (v1.3.0)
 BESCHREIBUNG: Kümmert sich um das Auslesen von epub-Dateien
              Verwendet jetzt das BookData Model, dabei wird id= 0 und is_read = 0 gesetzt.
              Dies muss beim Speichern beachtet, bzw. ignoriert werden!
 """
-import zipfile
-import xml.etree.ElementTree as ET
+
 import os
 import re
 import tempfile
 import html # Oben zu den Imports
+import zipfile
+import xml.etree.ElementTree as ET
 from typing import Dict, Any
+from tqdm import tqdm
 
 try:
     from Apps.book_data import BookData
+    from Gemini.file_utils import clean_description, sanitize_path
+
 except ImportError:
     # Falls das Modul beim Standalone-Test nicht gefunden wird
     BookData = None
@@ -51,55 +55,33 @@ def _get_opf_root(zf, epub_path):
         return None, None
 
 
-def clean_html(raw_html):
-    if not raw_html: return ""
-    # 1. HTML-Entities auflösen (z.B. &#8212; zu —)
-    clean = html.unescape(raw_html)
-    # 2. Ersetze Block-Elemente durch Zeilenumbrüche
-    clean = re.sub(r'<(div|p|br|li|h1|h2)[^>]*>', '\n', clean)
-    # 3. Alle restlichen HTML-Tags entfernen
-    clean = re.sub(r'<[^>]+>', '', clean)
-    # 4. Whitespace-Kosmetik
-    clean = re.sub(r'[ \t]+', ' ', clean) # Tabulatoren/Doppel-Leerzeichen weg
-    clean = re.sub(r'\n\s*\n+', '\n\n', clean).strip() # Max 2 Umbrüche
-    return clean
-
 def _get_dc_element(opf_root, tag_name):
     """Extrahiert den Text eines einzelnen Dublin Core Elements."""
     if opf_root is None: return None
     element = opf_root.find(f".//dc:{tag_name}", NS_DC)
     return element.text.strip() if element is not None and element.text else None
 
-
 def _get_all_dc_elements(opf_root, tag_name):
     """Extrahiert alle Dublin Core Elemente (Liste)."""
     if opf_root is None: return []
     return [el.text.strip() for el in opf_root.findall(f".//dc:{tag_name}", NS_DC) if el.text]
 
-
 def _get_cover_image_relative_path(opf_root, opf_path):
     """Sucht den relativen Pfad des Titelbildes innerhalb des EPUB-Containers."""
     if opf_root is None: return None
-
     # 1. Finde die Cover-ID im Metadaten-Bereich
     cover_meta = opf_root.find(".//opf:metadata/opf:meta[@name='cover']", NS_OPF)
-
     if cover_meta is not None:
         cover_id = cover_meta.get('content')
-
         # 2. Finde den Pfad (href) anhand der ID im Manifest
         cover_item = opf_root.find(f".//opf:manifest/opf:item[@id='{cover_id}']", NS_OPF)
-
         if cover_item is not None:
             relative_image_path = cover_item.get('href')
-
             # Wir müssen den Pfad relativ zum EPUB-Stammverzeichnis machen.
             opf_dir = os.path.dirname(opf_path)
             full_path = os.path.join(opf_dir, relative_image_path)
-
             # Auf Linux/Windows-Pfad-Konsistenz achten (EPUBs nutzen oft /)
             return full_path.replace('\\', '/')
-
     return None
 
 
@@ -123,7 +105,7 @@ def _extract_and_save_cover(zf, internal_cover_path):
             return temp_file.name
 
     except Exception as e:
-        print(f"FEHLER beim Extrahieren des Covers {internal_cover_path}: {e}")
+        # tqdm.write(f"FEHLER beim Extrahieren des Covers {internal_cover_path}: {e}")
         return None
 
 
@@ -204,23 +186,38 @@ def _split_title_series(full_title):
 
 
 # --- Die Hauptfunktion für deinen Scan ---
-
 def get_epub_metadata(epub_file_path) -> Dict[str, Any]:
     """
     Extrahiert alle priorisierten Metadaten aus einem EPUB und gibt sie
     in einem Dictionary gemäß dem finalen Schema der BookData-Klasse zurück.
     """
     try:
+        # Pfad sofort normalisieren (Umlaute/Slashes)
+        epub_file_path = sanitize_path(epub_file_path)
+
+        # --- A. MAGIC BYTES CHECK (Vorab-Check) ---
+        with open(epub_file_path, 'rb') as f:
+            header = f.read(4)
+
+        if header == b'%PDF':
+            new_path = epub_file_path.rsplit('.', 1)[0] + '.pdf'
+            os.rename(epub_file_path, new_path)
+            return {'_RESCUED_PATH': new_path}
+
+        # --- B. REGULÄRES EPUB PARSING ---
+        if not zipfile.is_zipfile(epub_file_path):
+            return {}
+
         with zipfile.ZipFile(epub_file_path, 'r') as zf:
             opf_root, opf_path = _get_opf_root(zf, epub_file_path)
             if opf_root is None:
-                print(f"WARNUNG: Konnte Metadaten aus {epub_file_path} nicht lesen.")
+                tqdm.write(f"WARNUNG: Konnte Metadaten aus {epub_file_path} nicht lesen.")
                 return {}
 
             # --- Metadaten-Rohdaten einlesen ---
             raw_title = _get_dc_element(opf_root, 'title')
             raw_description = _get_dc_element(opf_root, 'description')
-            book_description = clean_html(raw_description) if raw_description else ""
+            book_description = clean_description(raw_description) if raw_description else ""
             raw_authors = _get_all_dc_elements(opf_root, 'creator')
             keywords_epub = _get_all_dc_elements(opf_root, 'subject')
             raw_identifier = _get_dc_element(opf_root, 'identifier')
@@ -241,18 +238,30 @@ def get_epub_metadata(epub_file_path) -> Dict[str, Any]:
 
             # --- 2. Titel-Zerlegung (Serie, Nummer, Titel) ---
             title, series_name, series_number = _split_title_series(raw_title)
-
             # ISBN-Extraktion
             isbn = raw_identifier.split(':')[-1] if raw_identifier and ':' in raw_identifier else raw_identifier
+            isbn = re.sub(r'[^\dX]', '', str(isbn))  # Nur Zahlen und X behalten
 
             # --- 3. Erstellung des BookData-Objekts (Wurzel-Korrektur) ---
             # Wenn BookData verfügbar ist, geben wir ein Objekt zurück, sonst ein sauberes Dict
+
+            # Extraktion und Validierung des Jahres
+            raw_date = _get_dc_element(opf_root, 'date')
+            clean_year = None
+            if raw_date:
+                # Extrahiere die ersten 4 Ziffern (Jahr)
+                match = re.search(r'\d{4}', raw_date)
+                if match:
+                    extracted_year = match.group(0)
+                    # "0101" ist der typische Platzhalter für "unbekannt"
+                    if extracted_year != "0101":
+                        clean_year = extracted_year
             data_content = {
                 'path': epub_file_path,  # Geändert von file_path auf path
                 'title': title or "Unbekannter Titel",
                 'authors': normalized_authors,
                 'isbn': isbn,
-                'year': _get_dc_element(opf_root, 'date')[:4] if _get_dc_element(opf_root, 'date') else None,
+                'year': clean_year,
                 'language': raw_language,
                 'series_name': series_name,
                 'series_number': series_number,
@@ -264,13 +273,132 @@ def get_epub_metadata(epub_file_path) -> Dict[str, Any]:
             # --- FINAL: Dictionary MAPPING AUF BOOKMETADATA-SCHLÜSSEL ---
             return data_content
 
-
     except zipfile.BadZipFile:
-        print(f"FEHLER: '{epub_file_path}' ist keine gültige Zip-Datei (EPUB).")
-        return {}
+        # 1. Prüfen, ob es wirklich ein PDF ist (Magic Bytes Check)
+        try:
+            with open(epub_file_path, 'rb') as f:
+                header = f.read(4)
+
+            if header == b'%PDF':
+                new_path = epub_file_path.rsplit('.', 1)[0] + '.pdf'
+                tqdm.write(f"✅ Rescue: PDF-Header erkannt. Benenne um zu: {os.path.basename(new_path)}")
+
+                # Datei physisch umbenennen
+                os.rename(epub_file_path, new_path)
+
+                # Spezial-Rückgabe für den Haupt-Scanner
+                return {'_RESCUED_AS_PDF': new_path}
+            else:
+                tqdm.write(f"❌ Rescue fehlgeschlagen: Datei ist auch kein PDF.")
+                return {}
+        except Exception as e:
+            tqdm.write(f"❌ Kritischer Fehler beim Rescue-Versuch: {e}")
+            return {}
+
     except Exception as e:
-        print(f"Kritischer Fehler in get_epub_metadata: {e}")
+        tqdm.write(f"Kritischer Fehler in get_epub_metadata: {e}")
         return {}
+
+def enrich_from_epub(book_data, file_path):
+    """Nutzt get_epub_metadata, um das BookData-Objekt anzureichern."""
+    try:
+        # Ruft deine Funktion aus read_epub.py auf
+        epub_raw = get_epub_metadata(file_path)
+        if not epub_raw:
+            return
+
+        # Nur füllen, wenn das Feld im book_data noch leer oder Standard ist.
+        # 1. Basis-Metadaten (nur wenn leer)
+        if not book_data.isbn:
+            book_data.isbn = epub_raw.get('isbn')
+        if not book_data.year or book_data.year == "0101":
+            book_data.year = epub_raw.get('year')
+        # 2. Autoren & Titel (nur wenn 'Unbekannt' oder leer)
+        if not book_data.authors or book_data.authors == [("", "Unbekannt")] or book_data.authors == [("", "Kein Autor")]:
+            book_data.authors = epub_raw.get('authors', book_data.authors)
+
+        if not book_data.title or book_data.title == "Unbekannter Titel":
+            book_data.title = epub_raw.get('title', book_data.title)
+        # 3. Serie (EPUB-Tags sind hier oft Gold wert)
+        if not book_data.series_name:
+            book_data.series_name = epub_raw.get('series_name')
+            book_data.series_number = epub_raw.get('series_number')
+        # 4. Beschreibung (Clean HTML wurde bereits in read_epub erledigt)
+        if not book_data.description and not getattr(book_data, 'is_manual_description', 0):
+            book_data.description = epub_raw.get('description')
+        # 5. Keywords & Bild
+        if epub_raw.get('keywords'):
+            # Wir fügen die EPUB-Subject-Tags zu unseren Keywords hinzu (Set-Update)
+            # Wir filtern kurze oder rein numerische Tags direkt aus
+            valid_tags = [t for t in epub_raw['keywords'] if len(t) > 2]
+            book_data.keywords.update(valid_tags)
+        if not book_data.image_path:
+            book_data.image_path = epub_raw.get('image_path')
+
+    except Exception as e:
+        print(f"Fehler bei _enrich_from_epub: {e}")
+
+
+def fast_fix_extensions(root_dir):
+    """Prüft blitzschnell alle .epub Dateien auf echten Inhalt."""
+    repariert = 0
+    fehler = 0
+
+    # Wir sammeln erst alle EPUBs, um den Fortschrittsbalken zu füttern
+    print("Sammle Dateiliste...")
+    epub_files = []
+    for root, _, files in os.walk(root_dir):
+        for f in files:
+            if f.lower().endswith('.epub'):
+                epub_files.append(os.path.join(root, f))
+
+    print(f"Prüfe {len(epub_files)} EPUB-Dateien auf PDF-Inhalt...")
+
+    for path in tqdm(epub_files, desc="Analyse"):
+        try:
+            # 1. Schneller Header-Check (Magic Bytes)
+            with open(path, 'rb') as f:
+                header = f.read(4)
+
+            # Wenn es mit %PDF beginnt, ist es ein PDF
+            if header == b'%PDF':
+                new_path = path.rsplit('.', 1)[0] + '.pdf'
+                os.rename(path, new_path)
+                repariert += 1
+                continue
+
+            # 2. Falls kein PDF, prüfen ob es ein valides ZIP (EPUB) ist
+            # (Optional, falls du auch korrupte Dateien finden willst)
+            if not zipfile.is_zipfile(path):
+                # tqdm.write(f"⚠️ Defekt oder unbekannt: {path}")
+                fehler += 1
+
+        except Exception as e:
+            tqdm.write(f"❌ Fehler bei {path}: {e}")
+
+    print(f"\n--- FERTIG ---")
+    print(f"✅ Reparierte PDFs: {repariert}")
+    print(f"⚠️ Unklare Dateien: {fehler}")
+
+import subprocess
+def convert_mobi_to_epub(root_path):
+    for root, dirs, files in os.walk(root_path):
+        for file in files:
+            if file.lower().endswith(".mobi"):
+                mobi_path = os.path.join(root, file)
+                epub_path = mobi_path.rsplit(".", 1)[0] + ".epub"
+
+                if not os.path.exists(epub_path):
+                    print(f"Konvertiere: {file}...")
+                    # Calibre ebook-convert nutzen
+                    try:
+                        subprocess.run(['ebook-convert', mobi_path, epub_path], check=True)
+                        print(f"✅ Erfolg: {epub_path}")
+                    except Exception as e:
+                        print(f"❌ Fehler bei {file}: {e}")
+
+# Aufruf: convert_mobi_to_epub("D:/Bücher")
+
 
 # --- Beispiel-Aufruf (zum Testen) ---
 # if __name__ == '__main__':

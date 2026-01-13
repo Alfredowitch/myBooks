@@ -1,63 +1,39 @@
 """
 DATEI: book_analyzer.py
-PROJEKT: MyBook-Management (v1.2.0)
+PROJEKT: MyBook-Management (v1.3.0)
 BESCHREIBUNG: Analysiert die Daten in der Datenbank.
               Zentrales Refresh-System für additive Filter und Code-Anzeige.
 """
 import logging
 import os
+import platform
 import tkinter as tk
 from tkinter import messagebox, ttk
 import pandas as pd
 import sqlite3
 
-from book_browser import BookBrowser
+from Apps.book_browser import BookBrowser
+from Gemini.file_utils import DB_PATH, sanitize_path
 
-DB_PATH = r'M:/books.db'
-
-# Logger konfigurieren
+# Logger Setup (Nutzt den Ordner der DB)
 LOG_FILE = os.path.join(os.path.dirname(DB_PATH), 'analyzer.log')
+logging.basicConfig(
+    filename=LOG_FILE, level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger('LibraryAnalyzer')
-logger.setLevel(logging.DEBUG)
-fh = logging.FileHandler(LOG_FILE, mode='w', encoding='utf-8')
-fh.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-logger.addHandler(fh)
-
-def cleanup_file_names_and_paths(db_path):
-    # 1. Alle Bücher laden
-    all_books = load_all_books_from_db(db_path)
-
-    for book in all_books:
-        current_path = book.path
-        filename = os.path.basename(current_path)
-
-        # Prüfe auf das Muster "Nachname, Vorname - Titel"
-        if "," in filename and " - " in filename:
-            new_filename = fix_filename_format(filename)  # Deine Logik zum Umdrehen
-            new_path = os.path.join(os.path.dirname(current_path), new_filename)
-
-            # Physisches Umbenennen
-            if not os.path.exists(new_path):
-                os.rename(current_path, new_path)
-
-                # Objekt aktualisieren
-                book.path = new_path
-                # Wichtig: Hier rufen wir direkt save() auf,
-                # weil wir nur den Pfad ändern wollen, nicht die Metadaten.
-                book.save(db_path)
-                print(f"Begradigt: {new_filename}")
-
 
 class LibraryAnalyzer:
-    def __init__(self, master, db_path):
+    def __init__(self, master):
         self.master = master
-        self.db_path = db_path
+        self.db_path = DB_PATH
         self.master.title("Library Analyzer - Statistik & Analyse")
         self.master.geometry("1200x850")
 
         # Zustands-Speicher (Das "Gedächtnis" für die Filter)
         self.current_view = "snapshot"
         self.current_lang = "Alles"
+        self.browser_instance = None
         self.df = self.load_data()
 
         # UI Layout
@@ -87,7 +63,10 @@ class LibraryAnalyzer:
             df = pd.read_sql_query(query, conn)
             conn.close()
             df['full_author'] = (df['firstname'].fillna('') + ' ' + df['lastname'].fillna('Unbekannt')).str.strip()
+            # Pfade normalisieren (wichtig für Mismatch-Suche)
+            df['path'] = df['path'].apply(lambda x: sanitize_path(x) if x else "")
             return df
+
         except Exception as e:
             logger.error(f"Fehler beim Laden: {e}")
             return pd.DataFrame()
@@ -117,7 +96,8 @@ class LibraryAnalyzer:
             ("Top 30 Autoren", self.show_top_authors, None),
             ("Bottom 30 Autoren", self.show_bottom_authors, None),
             ("Genre-Statistik", self.show_genre_stats, None),
-            ("Regionen-Statistik", self.show_region_stats, None)
+            ("Regionen-Statistik", self.show_region_stats, None),
+            ("Serien-Statistik", self.show_top_series, None)
         ]
         for text, cmd, color in actions:
             tk.Button(self.left_panel, text=text, width=25, command=cmd, bg=color).pack(pady=2)
@@ -125,6 +105,10 @@ class LibraryAnalyzer:
         tk.Label(self.left_panel, text="Health-Report", font=("Arial", 10, "bold"), bg="#f0f0f0").pack(pady=(15, 5))
         tk.Button(self.left_panel, text="Doppelte Titel", width=25, bg="#ffcc00", command=self.show_double_titles).pack(pady=2)
         tk.Button(self.left_panel, text="Ähnliche Autoren (Punkt)", width=25, bg="#ffcc00", command=self.show_fuzzy_authors).pack(pady=2)
+
+        tk.Button(self.left_panel, text="Verwaiste Autoren", width=25, bg="#f8d7da", command=self.show_orphaned_authors).pack(pady=2)
+        tk.Button(self.left_panel, text="Ungültige Autorennamen", width=25, bg="#f8d7da", command=self.show_bad_author_names).pack(pady=2)
+        tk.Button(self.left_panel, text="Bücher: Fehlende Daten", width=25, bg="#f8d7da", command=self.show_missing_book_data).pack(pady=2)
 
         tk.Label(self.left_panel, text="Tools", font=("Arial", 10, "bold"), bg="#f0f0f0").pack(pady=(15, 5))
         tk.Button(self.left_panel, text="Browser öffnen", width=25, bg="#ffc107", command=self.open_in_browser).pack(pady=2)
@@ -181,6 +165,11 @@ class LibraryAnalyzer:
             result = df_work['genre'].value_counts().reset_index()
             result.columns = ['Genre', 'Menge']
             final_code = f"{l_code}['genre'].value_counts()"
+        elif self.current_view == "region":
+            # NEU: Regionen-Statistik
+            result = df_work[df_work['region'].notna()]['region'].value_counts().reset_index()
+            result.columns = ['Region', 'Menge']
+            final_code = f"{l_code}['region'].value_counts()"
         elif self.current_view == "double_titles":
             result = df_work[df_work.duplicated(subset=['title'], keep=False)]
             result = result.sort_values(by='title')[['id', 'title', 'full_author', 'language', 'path']]
@@ -193,6 +182,62 @@ class LibraryAnalyzer:
             duplicates = df_work[df_work.duplicated(subset=['clean_name'], keep=False)]
             result = duplicates.sort_values(by='clean_name')[['id', 'full_author', 'title']]
             final_code = f"{l_code}[{l_code}['full_author'].str.replace('.','').duplicated(keep=False)]"
+            # ... (nach fuzzy_authors in der if-elif Kette ergänzen)
+
+        elif self.current_view == "orphaned_authors":
+            # Autoren, die in der Autorenliste stehen, aber keinem Buch zugeordnet sind
+            # Da dein 'df' über einen LEFT JOIN geladen wird, müssen wir hier
+            # ggf. eine separate Abfrage machen oder die Liste abgleichen.
+            # Einfacher Ansatz über SQL (da df nur verknüpfte Daten enthält):
+            try:
+                conn = sqlite3.connect(self.db_path)
+                query = "SELECT id, firstname, lastname FROM authors WHERE id NOT IN (SELECT author_id FROM book_authors)"
+                result = pd.read_sql_query(query, conn)
+                conn.close()
+                result['full_author'] = (
+                            result['firstname'].fillna('') + ' ' + result['lastname'].fillna('')).str.strip()
+                final_code = "SQL: SELECT * FROM authors WHERE id NOT IN (SELECT author_id FROM book_authors)"
+            except:
+                result = pd.DataFrame(columns=['id', 'full_author'])
+
+        elif self.current_view == "bad_author_names":
+            # Filter nach Platzhaltern wie " ", "Kein Autor", "Unknown"
+            bad_patterns = ['', ' ', 'Kein Autor', 'Unknown', 'Unbekannt']
+            result = df_work[df_work['full_author'].isin(bad_patterns)]
+            result = result[['id', 'title', 'full_author', 'path']]
+            final_code = f"{l_code}[{l_code}['full_author'].isin({bad_patterns})]"
+
+        elif self.current_view == "missing_book_data":
+            # Filter nach: Kein Pfad, kein Rating (0 oder NaN), keine Beschreibung (NaN oder leer)
+            mask = (
+                    (df_work['path'].isna()) | (df_work['path'] == '') |
+                    (df_work['rating'].isna()) | (df_work['rating'] <= 0) |
+                    (df_work['comments'].isna()) | (df_work['comments'] == '')
+            )
+            result = df_work[mask][['id', 'title', 'full_author', 'rating', 'path']]
+            final_code = f"{l_code}[(df['path'].isna()) | (df['rating'] <= 0) | (df['comments'].isna())]"
+
+        elif self.current_view == "top_series":
+            # Wir nutzen SQL für die Top 30 Serien mit Nummern-Check
+            try:
+                conn = sqlite3.connect(self.db_path)
+                # GROUP_CONCAT hilft uns, die vorhandenen Nummern direkt zu sehen
+                query = """
+                            SELECT series_name, COUNT(id) as Menge, 
+                                   GROUP_CONCAT(DISTINCT series_number) as Bände, language
+                            FROM books 
+                            WHERE series_name IS NOT NULL AND series_name != ''
+                        """
+                if self.current_lang != "Alles":
+                    query += f" AND language = '{self.current_lang}'"
+
+                query += " GROUP BY series_name, language ORDER BY Menge DESC LIMIT 30"
+                result = pd.read_sql_query(query, conn)
+                conn.close()
+                final_code = "SQL: GROUP BY series_name ORDER BY count DESC"
+            except Exception as e:
+                logger.error(f"Serien-Fehler: {e}")
+                result = pd.DataFrame()
 
         # 3. Schritt: UI Update
         self.code_label.config(text=final_code)
@@ -210,6 +255,12 @@ class LibraryAnalyzer:
     def show_region_stats(self): self.current_view = "region"; self.refresh_data() # (In refresh_data ergänzbar)
     def show_double_titles(self): self.current_view = "double_titles"; self.refresh_data()
     def show_fuzzy_authors(self): self.current_view = "fuzzy_authors"; self.refresh_data()
+
+    def show_orphaned_authors(self): self.current_view = "orphaned_authors"; self.refresh_data()
+    def show_bad_author_names(self): self.current_view = "bad_author_names"; self.refresh_data()
+    def show_missing_book_data(self): self.current_view = "missing_book_data"; self.refresh_data()
+
+    def show_top_series(self): self.current_view = "top_series"; self.refresh_data()
 
     # ----------------------------------------------------------------------
     # HILFSFUNKTIONEN (BLEIBEN FAST GLEICH)
@@ -268,76 +319,130 @@ class LibraryAnalyzer:
             return [int(self.tree.item(i)['values'][idx]) for i in items]
         return []
 
+    # ----------------------------------------------------------------------
+    # TOOLS & BROWSER-INTEGRATION
+    # ----------------------------------------------------------------------
     def open_in_browser(self):
-        # Wir suchen erst selektierte Bücher, dann alle sichtbaren
-        ids = self.get_selected_ids()
-        if not ids:
-            ids = self.get_all_visible_ids()
+        # 1. Auswahl im Treeview prüfen
+        items = self.tree.selection()
+        if not items:
+            items = self.tree.get_children()  # Fallback: Alle sichtbaren
 
-        if ids:
-            # 1. Fall: Wir haben IDs direkt im Tree (z.B. bei "double_titles" oder "fuzzy_authors")
+        if not items:
+            messagebox.showwarning("Hinweis", "Keine Einträge zum Öffnen gefunden.")
+            return
+
+        cols = list(self.tree["columns"])
+        path_list = []
+
+        # --- LOGIK-WEICHE JE NACH ANSICHT ---
+        # FALL A: Serien-Ansicht (Top 30 Serien)
+        if 'series_name' in cols:
+            idx_series = cols.index('series_name')
+            idx_lang = cols.index('language') if 'language' in cols else None
+
+            # Wir sammeln alle markierten Seriennamen (und Sprachen, falls vorhanden)
+            for i in items:
+                vals = self.tree.item(i)['values']
+                s_name = vals[idx_series]
+                s_lang = vals[idx_lang] if idx_lang is not None else None
+
+                # Filter auf das Haupt-DF anwenden
+                mask = (self.df['series_name'] == s_name)
+                if s_lang and s_lang != "Alles":
+                    mask &= (self.df['language'] == s_lang)
+
+                # Pfade holen und nach Seriennummer sortieren, damit die Reihenfolge im Browser stimmt
+                paths = self.df[mask].sort_values(by='series_number')['path'].tolist()
+                path_list.extend([p for p in paths if p])
+
+        # FALL B: IDs vorhanden (Snapshots, Doppelte Titel, etc.)
+        elif 'id' in cols:
+            idx_id = cols.index('id')
+            ids = [int(self.tree.item(i)['values'][idx_id]) for i in items]
             path_list = self.df[self.df['id'].isin(ids)]['path'].tolist()
+
+        # FALL C: Autoren (Top 30 Autoren)
+        elif 'Autor' in cols or 'full_author' in cols:
+            col_name = 'Autor' if 'Autor' in cols else 'full_author'
+            idx_auth = cols.index(col_name)
+            selected_authors = [self.tree.item(i)['values'][idx_auth] for i in items]
+
+            mask = self.df['full_author'].isin(selected_authors)
+            if self.current_lang != "Alles":
+                mask &= (self.df['language'] == self.current_lang)
+
+            path_list = self.df[mask]['path'].tolist()
         else:
-            # 2. Fall: Wir haben keine IDs, aber vielleicht Autoren ausgewählt?
-            # Wir schauen, was im Tree markiert ist
-            items = self.tree.selection()
-            if not items:
-                items = self.tree.get_children()  # Nimm alle, wenn nichts markiert
-            cols = list(self.tree["columns"])
-            if 'Autor' in cols:
-                idx = cols.index('Autor')
-                selected_authors = [self.tree.item(i)['values'][idx] for i in items]
-                # Jetzt holen wir uns alle Pfade aus dem Haupt-DF, die zu diesen Autoren passen
-                # Wichtig: Wir nutzen df_work (oder self.df), um nur die passende Sprache zu kriegen
-                path_list = self.df[self.df['full_author'].isin(selected_authors)]['path'].tolist()
-            else:
-                print("Keine IDs und keine Autorenspalte zur Identifikation gefunden.")
-                return
+            print("Keine IDs, Autoren oder Serien zur Identifikation gefunden.")
+            return
+
+        # --- BROWSER STARTEN / AKTUALISIEREN ---
+        path_list = list(dict.fromkeys(path_list))  # Dubletten entfernen (erhält Reihenfolge)
 
         if path_list:
-            from Apps.book_browser import BookBrowser  # Sicherstellen, dass Import passt
-            BookBrowser(tk.Toplevel(self.master), initial_list=path_list)
+            if self.browser_instance is not None and hasattr(self.browser_instance,
+                                                             'win') and self.browser_instance.win.winfo_exists():
+                self.browser_instance.win.lift()
+                if hasattr(self.browser_instance, 'load_new_list'):
+                    self.browser_instance.load_new_list(path_list)
+            else:
+                top = tk.Toplevel(self.master)
+                self.browser_instance = BookBrowser(top, initial_list=path_list)
+                top.transient(self.master)
         else:
-            print("Keine Daten zum Übernehmen vorhanden.")
+            messagebox.showwarning("Hinweis", "Keine gültigen Dateipfade für diese Auswahl gefunden.")
 
     def delete_selected_records(self):
-        # 1. Versuch: IDs direkt aus dem Tree holen
+        """Löscht Datensätze sicher aus der DB."""
         ids = self.get_selected_ids()
 
-        # 2. Versuch: Falls keine IDs da sind, schauen ob Autoren selektiert sind
         if not ids:
             items = self.tree.selection()
             if not items: return
-
             cols = list(self.tree["columns"])
             if 'Autor' in cols:
                 idx = cols.index('Autor')
                 selected_authors = [self.tree.item(i)['values'][idx] for i in items]
-                # Hol die IDs aller Bücher dieser Autoren
                 ids = self.df[self.df['full_author'].isin(selected_authors)]['id'].tolist()
 
         if not ids:
             logger.warning("Keine Datensätze zum Löschen identifiziert.")
             return
 
-        # Bestätigung einholen (Wichtig, da es jetzt viele Bücher sein könnten!)
         if not messagebox.askyesno("Löschen", f"Sollen {len(ids)} Datensätze wirklich gelöscht werden?"):
             return
 
         try:
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
-                # Foreign Key Constraint beachten: Erst die Verknüpfungen!
-                cursor.executemany("DELETE FROM book_authors WHERE book_id = ?", [(i,) for i in ids])
-                cursor.executemany("DELETE FROM books WHERE id = ?", [(i,) for i in ids])
+            # Verbindung manuell öffnen
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            # SQLite mitteilen, dass wir Foreign Keys berücksichtigen (sicher ist sicher)
+            cursor.execute("PRAGMA foreign_keys = ON;")
+            # Wir bauen einen String für die SQL-Abfrage: (?, ?, ?)
+            placeholders = ','.join(['?'] * len(ids))
 
-            # DataFrame im Speicher aktualisieren
-            self.df = self.df[~self.df['id'].isin(ids)]
+            # 1. SCHRITT: Zuerst die Einträge in der Link-Tabelle löschen
+            # (Die "Kinder" in der Buch-Autor-Verknüpfung)
+            cursor.execute(f"DELETE FROM book_authors WHERE book_id IN ({placeholders})", ids)
+            logger.debug(f"Links für IDs {ids} aus book_authors entfernt.")
+            # 2. SCHRITT: Jetzt die eigentlichen Bücher löschen
+            cursor.execute(f"DELETE FROM books WHERE id IN ({placeholders})", ids)
+            logger.debug(f"Bücher mit IDs {ids} aus books entfernt.")
+            # 3. SCHRITT: Die Änderungen festschreiben und Verbindung ZU
+            conn.commit()
+            conn.close()
+
+            # 4. SCHRITT: Daten im Programm neu laden
+            # Wir holen uns den Stand FRISCH von der Platte, nicht nur aus dem Speicher
+            self.df = self.load_data()
             self.refresh_data()
-            logger.info(f"{len(ids)} Datensätze aus DB und Analyse entfernt.")
+            logger.info(f"Erfolgreich {len(ids)} Datensätze gelöscht.")
+            messagebox.showinfo("Erfolg", f"{len(ids)} Datensätze wurden dauerhaft gelöscht.")
+
         except Exception as e:
             logger.error(f"Löschfehler: {e}")
-            messagebox.showerror("Fehler", f"Löschfehler: {e}")
+            messagebox.showerror("Fehler", f"Löschfehler beim Zugriff auf die DB: {e}")
 
     def on_tree_double_click(self, event):
         item = self.tree.selection()
@@ -373,9 +478,22 @@ class LibraryAnalyzer:
             self.current_view = "custom_drilldown"
 
 
+    def get_top_series(self, lang=None):
+        query = """
+            SELECT series_name, COUNT(id), language
+            FROM books
+            WHERE series_name IS NOT NULL AND series_name != ''
+        """
+        params = []
+        if lang:
+            query += " AND language = ?"
+            params.append(lang)
+
+        query += " GROUP BY series_name, language ORDER BY COUNT(id) DESC LIMIT 30"
+        return self.db.execute_query(query, params)
 
 
 if __name__ == "__main__":
     root = tk.Tk()
-    app = LibraryAnalyzer(root, DB_PATH)
+    app = LibraryAnalyzer(root)
     root.mainloop()

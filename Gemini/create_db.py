@@ -12,7 +12,7 @@ BESCHREIBUNG: Erstellt oder erweitert die Datenbank-Struktur.
 import sqlite3
 import os
 
-DB_PATH = "M://books.db"
+from Gemini.file_utils import DB_PATH
 
 
 def get_connection():
@@ -140,6 +140,7 @@ def update_database_structure():
         ("rating_ol", "REAL"),       # Bewertung von OpenLibrary
         ("ratings_count_ol", "INTEGER"),
         ("work_id", "INTEGER"),
+        ("regions", "TEXT"),
         ("api_source", "TEXT"),      # Dokumentiert, welche API zuletzt geliefert hat
         ("path", "TEXT"),            # hat in audiobooks gefehlt
         ("image_path", "TEXT")       # hat in books gefehlt
@@ -246,18 +247,90 @@ def check_db_entry(file_path):
             print(f"{key}: {data[key]}")
     else:
         print(f"⚠️ Kein Eintrag für diesen Pfad gefunden:\n{file_path}")
-
-
-
     conn.close()
 
 
+def count_0101():
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+
+        # Wir prüfen sowohl den String '0101' als auch die Zahl 101 (falls es als Integer gespeichert wurde)
+        cursor.execute("SELECT COUNT(*) FROM books WHERE year = '0101' OR year = 101 OR year = '101'")
+        count = cursor.fetchone()[0]
+
+        print(f"--- Datenbank-Check ---")
+        print(f"Anzahl der Einträge mit Jahr '0101': {count}")
+
+        # Optional: Zeige die ersten 5 Pfade an, um sicherzugehen
+        if count > 0:
+            print("\nBeispiel-Pfade:")
+            cursor.execute("SELECT path FROM books WHERE year = '0101' OR year = 101 LIMIT 5")
+            for row in cursor.fetchall():
+                print(f" - {row[0]}")
+
+        conn.close()
+    except Exception as e:
+        print(f"Fehler beim DB-Zugriff: {e}")
+
+
+def fix_db_0101():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    # 1. Wir löschen das falsche Jahr
+    cursor.execute("UPDATE books SET year = NULL WHERE year = '0101' OR year = 101 OR year = '101'")
+    affected_rows = cursor.rowcount
+
+    # 2. Wir setzen die Version zurück, damit der Scanner diese Files UNBEDINGT anfasst
+    # (Nur für die betroffenen 13.095 Zeilen)
+    cursor.execute("UPDATE books SET scanner_version = '1.3.0' WHERE year IS NULL AND scanner_version = '1.3.1'")
+
+    conn.commit()
+    conn.close()
+    print(f"Fertig! {affected_rows} Einträge wurden bereinigt.")
+    print("Die betroffenen Einträge wurden auf Version 1.3.0 zurückgesetzt, um einen Rescan zu erzwingen.")
+
+def migrate_to_path_in_links():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    try:
+        # 1. Die Link-Tabelle erweitern (Falls noch nicht geschehen)
+        try:
+            cursor.execute("ALTER TABLE book_authors ADD COLUMN path TEXT")
+            print("Spalte 'path' zu book_authors hinzugefügt.")
+        except sqlite3.OperationalError:
+            print("Spalte 'path' existiert bereits in book_authors.")
+
+        # 2. Bestehende Pfade aus 'books' in 'book_authors' migrieren
+        # Wir verknüpfen jeden aktuellen Buch-Pfad mit den Autoren in der Link-Tabelle
+        cursor.execute("""
+            UPDATE book_authors 
+            SET path = (SELECT path FROM books WHERE books.id = book_authors.book_id)
+            WHERE path IS NULL
+        """)
+        print(f"{cursor.rowcount} Pfade in die Link-Tabelle migriert.")
+
+        # 3. Unique-Index erstellen, um exakt gleiche Dubletten zu vermeiden
+        # (Autor A, Buch B, Pfad C darf nur einmal vorkommen)
+        try:
+            cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_link ON book_authors(book_id, author_id, path)")
+        except sqlite3.OperationalError:
+            pass
+
+        conn.commit()
+    except Exception as e:
+        print(f"Fehler bei Migration: {e}")
+        conn.rollback()
+    finally:
+        conn.close()
 
 if __name__ == "__main__":
     # Aufruf für 1. create_db
-    # connection = get_connection()
-    # create_db(connection)
-    # connection.close()
+    connection = get_connection()
+    create_db(connection)
+    connection.close()
 
     # Aufruf für weitere Funktionen
     update_database_structure()
@@ -266,3 +339,8 @@ if __name__ == "__main__":
     # Direkte Datenbankabfrage
     # buch_pfad = r"D:\Bücher\Business\Biographien\Ashlee Vance — Elon Musk. Die Biografie des Gründers von Tesla, PayPal, SpaceX (2015).epub"
     # check_db_entry(buch_pfad)
+
+    # count_0101()
+    # Anzahl der Einträge mit Jahr '0101': 13095
+    # - D:\Bücher\Deutsch\A\Alexander Oetker\Alexander Oetker — 01-Signora Commissaria und die dunklen Geister.epub
+    # fix_db_0101()

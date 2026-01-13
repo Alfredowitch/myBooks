@@ -59,6 +59,19 @@ def determine_region(categories: list, description: str) -> str | None:
     return None
 
 
+def determine_regions_set(categories, description):
+    regions = set()
+    text = (description + " " + " ".join(filter(None, categories))).lower()
+
+    for term, region_full in REGION_MAPPING.items():
+        if term in text:
+            # Klammern weg, splitten, "Allgemein" ignorieren
+            clean = region_full.replace("(", "").replace(")", "").replace("Allgemein", "")
+            parts = [p.strip() for p in clean.split() if p.strip()]
+            regions.update(parts)
+
+    return regions
+
 if __name__ == "__main__":
     # ... (Genre Mapping Tests unverändert) ...
 

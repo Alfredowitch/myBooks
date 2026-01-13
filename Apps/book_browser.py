@@ -16,22 +16,28 @@ BESCHREIBUNG: Ermöglicht das Navigieren, editieren und löschen von Büchern.
 """
 
 import os
-import sys
+import platform
 import tkinter as tk
 from tkinter import filedialog, messagebox
+from typing import Any, List, Optional, Dict  # Any ist das Wichtigste für deinen Fehler
+
+from Apps.book_data import BookData
+from Gemini.browser_view import BrowserView
+from Gemini.browser_model import BrowserModel
+from Gemini.file_utils import find_real_file
 
 # Pfade setzen (Apps -> Gemini)
-MODULES_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'Gemini'))
-sys.path.append(MODULES_DIR)
+def get_base_path():
+    # 'Darwin' ist der interne Name für macOS
+    if platform.system() == 'Darwin':
+        return "/Volumes/eBooks"
+    else:
+        # Hier trägst du deinen Windows-Pfad ein (z. B. 'Z:/' oder 'D:/eBooks')
+        return "M:/"
 
-try:
-    from browser_view import BrowserView
-    from browser_model import BrowserModel
-    from book_data import BookData
-except ImportError as e:
-    print(f"Fehler beim Modul-Import: {e}")
-
-DB_PATH = r'M://books.db'
+# Überall im Code nutzt du dann:
+BASE_PATH = get_base_path()
+DB_PATH = os.path.join(BASE_PATH, "books.db")
 
 
 class BookBrowser:
@@ -49,6 +55,9 @@ class BookBrowser:
         self.navigation_list = initial_list if initial_list else []
         self.current_index = 0
         self.current_file_path = None
+        # self.current_book_data = None
+        self.current_book_data: Optional['BookData'] = None
+        self.mismatch_errors = {}
 
         # Verknüpfung: Buttons & Menü
         self.view.create_nav_buttons(self)
@@ -98,70 +107,126 @@ class BookBrowser:
             self.current_index = self.navigation_list.index(path)
         self.load_data(path)
 
-    def load_data(self, file_path):
-        """Koordiniert den Datenfluss vom Model zur View."""
-        if not file_path: return
-        # Normierung der Pfade: normpath = "/" für alle OS D:/Bücher/buch.epub
-        self.current_file_path = os.path.abspath(os.path.normpath(file_path))
+    def load_data(self, identifier):
+        if not identifier: return
 
-        # A. Model: Daten aggregieren
-        self.current_book_data = self.model.aggregate_book_data(self.current_file_path)
-        # B. Controller: Navigation tracken
-        if self.current_file_path in self.navigation_list:
-            self.current_index = self.navigation_list.index(self.current_file_path)
-        # C. View: Alles anzeigen
-        self.view.fill_widgets(self.current_book_data)
-        self.view.display_cover(self.current_book_data.image_path, self.current_file_path)
-        self.view.update_status(self.current_index + 1, len(self.navigation_list), self.current_file_path)
+        # 1. Buch laden (Model nutzt jetzt Fuzzy-Suche/Messer schärfen)
+        book_obj = self.model.aggregate_book_data(identifier)
 
+        # 2. Index & Report-Info (wie gehabt)
+        if identifier in self.navigation_list:
+            self.current_index = self.navigation_list.index(identifier)
+
+        report_info = self.mismatch_errors.get(identifier, "") if hasattr(self, 'mismatch_errors') else ""
+
+        if not book_obj:
+            # FEHLERFALL (Dummy Objekt wie gehabt)
+            display_obj = BookData(title="DATEI NICHT LADBAR / KORRUPT", path=identifier)
+            display_obj.notes = f"⚠️ REPORT-INFO:\n{report_info}"
+            self.view.fill_widgets(display_obj)
+            self.view.update_status(self.current_index + 1, len(self.navigation_list), f"FEHLER: {identifier}",
+                                    is_magic=False)
+        else:
+            # MAGIC CHECK: Pfade vergleichen
+            is_magic = False
+            if not str(identifier).startswith("ID:"):
+                norm_id = os.path.normpath(identifier).lower()
+                norm_found = os.path.normpath(book_obj.path).lower()
+                if norm_id != norm_found:
+                    is_magic = True
+
+            # WICHTIG: Notizen mit Magic-Info anreichern (dein Report-Block)
+            if is_magic or report_info:
+                header = "⚠️ HINWEISE ZUM BUCH:\n"
+                if is_magic:
+                    header += f"✨ MAGIC: Pfad korrigiert!\nGesucht: {identifier}\nGefunden: {book_obj.path}\n\n"
+                if report_info:
+                    header += f"REPORT: {report_info}\n"
+                book_obj.notes = f"{header}{'-' * 30}\n{book_obj.notes or ''}"
+
+            # DATEN ÜBERNEHMEN
+            self.current_book_data = book_obj
+            self.current_file_path = book_obj.path  # Das ist jetzt der ECHTE Pfad auf Disk!
+
+            # VIEW AKTUALISIEREN
+            self.view.fill_widgets(self.current_book_data)
+
+            # Pfad-Feld auf Orange/Gelb schalten und den ECHTEN Pfad anzeigen
+            self.view.update_status(
+                self.current_index + 1,
+                len(self.navigation_list),
+                book_obj.path,  # <--- Hier den gefundenen Pfad anzeigen!
+                is_magic=is_magic
+            )
+
+            # COVER ANZEIGEN (Nutzt jetzt den geheilten self.current_file_path)
+            self.view.display_cover(getattr(book_obj, 'cover_path', None), self.current_file_path)
+
+    # ----------------------------------------------------------------------
+    # 3. Laden des Reports
+    # ----------------------------------------------------------------------
     def load_mismatch_report(self):
-        """Liest den Report ein und sammelt alle Fehlerzeilen pro Pfad."""
-        report_path = filedialog.askopenfilename(
-            title="Mismatch Report wählen",
-            filetypes=[("Textdateien", "*.txt")]
-        )
-        if not report_path:
-            return
-        report_data = {}  # { pfad: "Fehlerliste" }
-        current_path = None
-        current_errors = []
+        report_path = filedialog.askopenfilename(title="Report wählen", filetypes=[("Text", "*.txt")])
+        if not report_path: return
+        report_data = {}
+        current_block = []
 
         try:
             with open(report_path, 'r', encoding='utf-8') as f:
-                for line in f:
-                    line_stripped = line.strip()
-                    if not line_stripped:
-                        continue
-                    # 1. Neuer Pfad beginnt
-                    if line_stripped.lower().startswith("pfad:"):
-                        # Vorherigen Pfad speichern, falls vorhanden
-                        if current_path and current_errors:
-                            report_data[current_path] = "\n".join(current_errors)
-                        # Neuen Pfad extrahieren & normalisieren
-                        raw_path = line_stripped.split(":", 1)[1].strip()
-                        current_path = os.path.abspath(os.path.normpath(raw_path))
-                        current_errors = []
-                        continue
-                    # 2. Fehlerzeilen sammeln (alles mit dem ❌ oder 'Autor/Titel')
-                    if current_path and ("❌" in line_stripped or "vs." in line_stripped):
-                        current_errors.append(line_stripped)
-                # Letzten Eintrag nach dem Loop speichern
-                if current_path and current_errors:
-                    report_data[current_path] = "\n".join(current_errors)
+                lines = f.readlines()
+            for line in lines:
+                line_s = line.strip()
+                # Trenner markiert das Ende eines Blocks
+                if line_s.startswith("---") or line_s.startswith("___"):
+                    if current_block:
+                        self._process_report_block(current_block, report_data)
+                        current_block = []
+                    continue
+                if line_s:
+                    current_block.append(line_s)
+
+            # Letzten Block nicht vergessen
+            if current_block:
+                self._process_report_block(current_block, report_data)
 
             if report_data:
-                # WICHTIG: Navigation komplett neu aufsetzen
                 self.navigation_list = list(report_data.keys())
-                self.mismatch_errors = report_data  # Dictionary für die load_data Methode
+                self.mismatch_errors = report_data
                 self.current_index = 0
-                # Jetzt das erste Buch laden
-                self.load_data(self.navigation_list[0])
-                messagebox.showinfo("Erfolg", f"{len(self.navigation_list)} Bücher mit Fehlern geladen.")
-            else:
-                messagebox.showwarning("Fehler", "Keine Einträge gefunden. Stimmen die Pfade?")
-
+                first_item = self.navigation_list[0]
+                print(f"DEBUG: Versuche ersten Eintrag anzuzeigen: {first_item}")
+                try:
+                    self.load_data(first_item)
+                except Exception as e:
+                    print(f"⚠️ Erster Eintrag konnte nicht angezeigt werden: {e}")
+            else:  # <--- DIESES ELSE GEHÖRT ZU 'if report_data:'
+                messagebox.showwarning("Fehler", "Keine gültigen Einträge im Report gefunden.")
         except Exception as e:
-            messagebox.showerror("Fehler", f"Fehler beim Parsen: {e}")
+            messagebox.showerror("Fehler", f"Ladefehler: {e}")
+
+    def _process_report_block(self, block, data_dict):
+        """Analysiert einen gesammelten Block auf ID, Pfad und Fehler."""
+        found_id = None
+        found_path = None
+        errors = []
+
+        for line in block:
+            line_l = line.lower()
+            if "buch-id:" in line_l or "id:" in line_l:
+                found_id = line.split(":", 1)[1].strip()
+            elif "pfad:" in line_l:
+                p = line.split(":", 1)[1].strip()
+                if p and p.lower() not in ["", "unbekannt", "bereits leer"]:
+                    found_path = os.path.abspath(os.path.normpath(p))
+            elif "❌" in line or "info:" in line_l or "note:" in line_l:
+                errors.append(line)
+
+        # Priorität: Wenn wir eine ID haben, nutzen wir "ID:xxx" als Key
+        # Wenn nicht, den Pfad. So finden wir das Buch immer.
+        key = f"ID:{found_id}" if found_id else found_path
+        if key and errors:
+            data_dict[key] = "\n".join(errors)
+
 
     # ----------------------------------------------------------------------
     # 3. SUCH-LOGIK
@@ -236,32 +301,65 @@ class BookBrowser:
             messagebox.showinfo("Erfolg", "Daten gespeichert.")
             # WICHTIG: Nicht neu einlesen! Einfach zum nächsten Index springen
             self.nav_next()
+            # Holt sich den Fokus auf den Browser nach 100 millisekunden zurück, wenn alles erledigt ist.
+            self.win.after(100, self.win.focus_force)
         else:
             messagebox.showerror("Fehler", "Speichern fehlgeschlagen.")
 
     def delete_current_book(self):
-        if not self.current_book_data: return
+        if not self.navigation_list:
+            return
 
-        if messagebox.askyesno("Löschen", "Soll dieses Buch aus der Datenbank gelöscht werden?"):
-            # Wir übergeben das Objekt, damit das Model die ID hat
+        current_identifier = self.navigation_list[self.current_index]
+
+        if not messagebox.askyesno("Löschen", f"Eintrag aus Datenbank entfernen?\n\n{current_identifier}"):
+            return
+
+        # 1. Lösch-Versuch (Objekt-ID hat Priorität, sonst Identifier)
+        success = False
+        if self.current_book_data and hasattr(self.current_book_data, 'id'):
             success = self.model.delete_book(self.current_book_data)
+        else:
+            # Fallback für "Adam J. Dalton" (Datei fehlt)
+            if current_identifier.startswith("ID:"):
+                clean_id = current_identifier.replace("ID:", "").strip()
+                success = self.model.delete_book_by_id(clean_id)
+            else:
+                success = self.model.delete_book_by_path(current_identifier)
 
-            if success:
-                path = self.current_book_data.path
-                if path in self.navigation_list:
-                    self.navigation_list.remove(path)
+        if success:
+            # 2. Aus der Liste entfernen
+            self.navigation_list.pop(self.current_index)
 
-                if self.navigation_list:
-                    # Index korrigieren und neu laden
-                    self.current_index = min(self.current_index, len(self.navigation_list) - 1)
-                    self.load_current_book()  # Nutze deine bestehende Lade-Funktion
-                else:
-                    self.view.clear_fields()  # View leeren, wenn nichts mehr da ist
-                    messagebox.showinfo("Info", "Liste ist jetzt leer.")
+            # 3. ANZEIGE AKTUALISIEREN
+            if self.navigation_list:
+                # Index korrigieren, falls wir am Ende der Liste waren
+                if self.current_index >= len(self.navigation_list):
+                    self.current_index = len(self.navigation_list) - 1
+
+                # Das NÄCHSTE Buch in der Liste laden
+                new_identifier = self.navigation_list[self.current_index]
+                self.load_data(new_identifier)
+
+                # Explizites Update der Statuszeile (z. B. "1 von 4705")
+                self.view.update_status(
+                    self.current_index + 1,
+                    len(self.navigation_list),
+                    new_identifier
+                )
+            else:
+                # Wenn die Liste jetzt komplett leer ist
+                self.current_book_data = None
+                self.view.clear_fields()  # Methode in deiner View, die alle Entrys/Labels leert
+                self.view.update_status(0, 0, "Keine Einträge vorhanden")
+                messagebox.showinfo("Info", "Alle Mismatches abgearbeitet!")
+        else:
+            messagebox.showerror("Fehler", "Löschen fehlgeschlagen. Eintrag nicht gefunden.")
+
 
     def on_close(self):
         """Aufräumen beim Beenden."""
-        self.model.cleanup_temp_files()
+        # self.model.cleanup_temp_files()
         self.win.destroy()
 
 
