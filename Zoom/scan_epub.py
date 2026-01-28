@@ -17,7 +17,7 @@ from tqdm import tqdm
 
 try:
     from Apps.book_data import BookData
-    from Gemini.file_utils import clean_description, sanitize_path
+    from Zoom.utils import clean_description, sanitize_path
 
 except ImportError:
     # Falls das Modul beim Standalone-Test nicht gefunden wird
@@ -254,7 +254,7 @@ def get_epub_metadata(epub_file_path) -> Dict[str, Any]:
                     extracted_year = match.group(0)
                     # "0101" ist der typische Platzhalter für "unbekannt"
                     if extracted_year != "0101":
-                        clean_year = extracted_year
+                        clean_year = str(extracted_year)
             data_content = {
                 'path': epub_file_path,  # Geändert von file_path auf path
                 'title': title or "Unbekannter Titel",
@@ -297,45 +297,6 @@ def get_epub_metadata(epub_file_path) -> Dict[str, Any]:
     except Exception as e:
         tqdm.write(f"Kritischer Fehler in get_epub_metadata: {e}")
         return {}
-
-def enrich_from_epub(book_data, file_path):
-    """Nutzt get_epub_metadata, um das BookData-Objekt anzureichern."""
-    try:
-        # Ruft deine Funktion aus scan_epub.py auf
-        epub_raw = get_epub_metadata(file_path)
-        if not epub_raw:
-            return
-
-        # Nur füllen, wenn das Feld im book_data noch leer oder Standard ist.
-        # 1. Basis-Metadaten (nur wenn leer)
-        if not book_data.isbn:
-            book_data.isbn = epub_raw.get('isbn')
-        if not book_data.year or book_data.year == "0101":
-            book_data.year = epub_raw.get('year')
-        # 2. Autoren & Titel (nur wenn 'Unbekannt' oder leer)
-        if not book_data.authors or book_data.authors == [("", "Unbekannt")] or book_data.authors == [("", "Kein Autor")]:
-            book_data.authors = epub_raw.get('authors', book_data.authors)
-
-        if not book_data.title or book_data.title == "Unbekannter Titel":
-            book_data.title = epub_raw.get('title', book_data.title)
-        # 3. Serie (EPUB-Tags sind hier oft Gold wert)
-        if not book_data.series_name:
-            book_data.series_name = epub_raw.get('series_name')
-            book_data.series_number = epub_raw.get('series_number')
-        # 4. Beschreibung (Clean HTML wurde bereits in read_epub erledigt)
-        if not book_data.description and not getattr(book_data, 'is_manual_description', 0):
-            book_data.description = epub_raw.get('description')
-        # 5. Keywords & Bild
-        if epub_raw.get('keywords'):
-            # Wir fügen die EPUB-Subject-Tags zu unseren Keywords hinzu (Set-Update)
-            # Wir filtern kurze oder rein numerische Tags direkt aus
-            valid_tags = [t for t in epub_raw['keywords'] if len(t) > 2]
-            book_data.keywords.update(valid_tags)
-        if not book_data.image_path:
-            book_data.image_path = epub_raw.get('image_path')
-
-    except Exception as e:
-        print(f"Fehler bei _enrich_from_epub: {e}")
 
 
 def fast_fix_extensions(root_dir):

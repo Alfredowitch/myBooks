@@ -8,7 +8,7 @@ import requests
 import re
 from typing import Optional, Dict, Any, List
 from tqdm import tqdm
-
+import requests
 from Gemini.file_utils import clean_description
 
 # Basis-URL für die Google Books API
@@ -16,7 +16,6 @@ SEARCH_URL = "https://www.googleapis.com/books/v1/volumes"
 
 
 # --- Hilfsfunktionen (Optimiert) ---
-
 def _extract_prioritized_isbn(industry_identifiers: List[Dict[str, str]]) -> Optional[str]:
     """Extrahiert die ISBN-13 (bevorzugt) oder ISBN-10."""
     isbn_13 = None
@@ -79,9 +78,7 @@ def get_book_data_by_isbn(isbn: str) -> Dict[str, Any]:
         return {}
 
     volume_info = item.get('volumeInfo', {})
-
     published_date = volume_info.get('publishedDate')
-
     # Mapping auf BookData-Keys
     metadata = {
         # Ratings
@@ -176,6 +173,38 @@ def enrich_from_google_books(book_data):
             book_data.categories.extend(api_data.get('keywords'))
     # Am Ende geben wir das Objekt (verändert oder unverändert) zurück
     return book_data
+
+
+def search_google_books(title: str = None, author: str = None, isbn: str = None):
+    """Sucht bei Google Books und liefert ein flaches Dict für den Junior."""
+    query = ""
+    if isbn:
+        query = f"isbn:{isbn}"
+    elif title:
+        query = f"intitle:{title}" + (f"+inauthor:{author}" if author else "")
+
+    if not query: return None
+
+    url = f"https://www.googleapis.com/books/v1/volumes?q={query}&maxResults=1"
+    try:
+        response = requests.get(url, timeout=5)
+        data = response.json()
+        if "items" in data:
+            info = data["items"][0]["volumeInfo"]
+            # Wir bauen das Dict genau so, wie Junior es erwartet
+            return {
+                "title": info.get("title"),
+                "authors_raw": ", ".join(info.get("authors", [])),
+                "description": info.get("description"),
+                "isbn": next((i["identifier"] for i in info.get("industryIdentifiers", []) if i["type"] == "ISBN_13"),
+                             info.get("industryIdentifiers", [{}])[0].get("identifier")),
+                "language": info.get("language"),
+                "categories": info.get("categories", []),
+                "stars": int(info.get("averageRating", 0))
+            }
+    except Exception as e:
+        print(f"  [API] Google Books Fehler: {e}")
+    return None
 
 # -------------------------------------------------------------------------
 if __name__ == "__main__":

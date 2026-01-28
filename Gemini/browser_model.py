@@ -3,7 +3,7 @@ DATEI: browser_model.py
 PROJEKT: MyBook-Management (v1.3.0)
 BESCHREIBUNG: Kümmert sich um die Daten von der Book_Browser App.
               book_browser.py	=	Der Controller: Steuert den Flow (Laden -> Navigieren -> Speichern).
-              browser_view.py	=	Die Maske: Zeichnet alles und fängt Benutzereingaben ab.
+              browser_view_old.py	=	Die Maske: Zeichnet alles und fängt Benutzereingaben ab.
               browser_model.py	=	Das Gehirn: Muss die Methoden aggregate_book_data und save_book enthalten.
 """
 import os

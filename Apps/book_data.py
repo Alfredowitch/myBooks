@@ -1,18 +1,22 @@
 """
-DATEI: book_data.py
-PROJEKT: MyBook-Management (v1.3.0)
+DATEI: book_data_old.py
+PROJEKT: MyBook-Management (v1.4.0)
 BESCHREIBUNG: Book_Data     rDas Herzstück.	Kennt das DB-Schema, verwaltet die ID und speichert sich selbst.
               Book_Scanner	Neue Dateien finden & Metadaten extrahieren.	Erstellt BookData-Objekte und ruft .save() auf.
               Book_Browser	GUI für Anzeige und manuelle Korrektur.	Ruft .load_by_path() auf und modifiziert Attribute.
               BookCleaner	Statistiken, Dubletten-Check, KI-Auswertung.	Liest BookData-Listen für Berechnungen
-"""
 
+              Book          physikalisches Buch mit Dateinamen und Pfad und Sprache
+              Work          abstraktes sprachunabhängiges Werk mit Autor, Titel, Serienname und Seriennummer, Bewertung, Beschreibung
+              Serie         Serien für Werke
+"""
+import os
 import sqlite3
 import unicodedata
 from dataclasses import dataclass, asdict, is_dataclass, field
 from typing import Any
 
-from Gemini.file_utils import DB_PATH
+from Gemini.file_utils import DB_PATH, slugify
 
 @dataclass
 class BookData:
@@ -367,15 +371,31 @@ class BookData:
                 cursor.execute(sql, list(save_dict.values()))
                 self.id = cursor.lastrowid
 
-            # 2. Autoren-Verknüpfung (n:m)
+            # --- 2. KORRIGIERTE AUTOREN-VERKNÜPFUNG (mit Slug-Logik) ---
             cursor.execute("DELETE FROM book_authors WHERE book_id = ?", (self.id,))
             for fname, lname in self.authors:
                 cursor.execute("SELECT id FROM authors WHERE firstname=? AND lastname=?", (fname, lname))
                 res = cursor.fetchone()
-                a_id = res[0] if res else None
+                if res:
+                    a_id = res[0]
+                else:
+                    # Neuen Autor anlegen: Slug generieren & Kollisionen prüfen
+                    full_name = f"{fname} {lname}".strip()
+                    base_slug = slugify(full_name) or f"author-{self.id}"
+                    new_slug = base_slug
+                    counter = 1
+                    # Prüfen, ob der Slug bereits von einem anderen Autor belegt ist
+                    while True:
+                        cursor.execute("SELECT id FROM authors WHERE name_slug = ?", (new_slug,))
+                        if not cursor.fetchone():
+                            break  # Slug ist frei
+                        counter += 1
+                        new_slug = f"{base_slug}-{counter}"
 
-                if not a_id:
-                    cursor.execute("INSERT INTO authors (firstname, lastname) VALUES (?,?)", (fname, lname))
+                    cursor.execute(
+                        "INSERT INTO authors (firstname, lastname, name_slug) VALUES (?,?,?)",
+                        (fname, lname, new_slug)
+                    )
                     a_id = cursor.lastrowid
 
                 cursor.execute("INSERT INTO book_authors (book_id, author_id) VALUES (?,?)", (self.id, a_id))
@@ -492,7 +512,7 @@ class BookData:
         # SQL-Teil: Wir holen nur den Pfad.
         # Wenn ein Filter gesetzt ist, schränken wir die Suche direkt in der DB ein.
         if base_filter:
-            sql_filter = base_filter.replace('\\', '/') + '%'
+            sql_filter = os.path.normpath(base_filter).replace('\\', '/') + '%'
             sql = "SELECT path FROM books WHERE path LIKE ?"
             # WICHTIG: Wir nutzen hier eine Methode, die idealerweise einen Generator liefert
             # Falls search_sql fetchall() nutzt, ist das hier der Flaschenhals bei 100k Einträgen.
@@ -506,9 +526,8 @@ class BookData:
 
             if full_path:
                 # Schnelles String-Splitting statt os.path.dirname
-                norm_path = full_path.replace('\\', '/')
-                folder = norm_path.rsplit('/', 1)[0]
-
+                norm_path = os.path.abspath(os.path.normpath(full_path))
+                folder = os.path.dirname(norm_path)
                 folder_counts[folder] = folder_counts.get(folder, 0) + 1
 
         return folder_counts

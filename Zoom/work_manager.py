@@ -1,6 +1,6 @@
 import sqlite3
 from typing import Optional
-from Gemini.file_utils import normalize_text, DB2_PATH
+from Zoom.utils import normalize_text, DB2_PATH
 
 
 class WorkManager:

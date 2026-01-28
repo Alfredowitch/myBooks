@@ -1,18 +1,27 @@
 """
 DATEI: create_db.py
-VERSION: 1.2.0
+VERSION: 1.4.0
 BESCHREIBUNG: Erstellt oder erweitert die Datenbank-Struktur.
-     book_data.py: Das zentrale Formular mit scanner_version.
-     read_db_ebooks.py: Liest die Version und alle Daten sauber in das Objekt.
-     save_db_ebooks.py: Schreibt die Version und Updates zurück.
-     book_browser.py: Bereitet die Bookdaten aus Datei oder DB auf.
-     book_analyst.py: Analysisert die Datenbank nach Inkonsistenzen, Statistik, Auswertung
-     book_scanner.py: Scanned das Filesystem nach books. Nutzt die Version, um doppelte Arbeit zu vermeiden.
+     - Wir haben books mit der Verbindung zur Filestruktur, mit separaten Büchern für jeden Autor, Sprache und evtl. Thema
+       Hier steht auch der Dateiname und Pfadname für jedes Buch, damit auch reduntant die Autoren und Titel etc.
+     - Davon abstrahiert haben wir das abstrakte Werk, z.B. Herry Potter Band 1. unabhängig von Sprache und Format.
+       Hier speichern wir Beschreibung, Rating, Serienname und Seriennummer und Autorenverbindungen über work_author.
+       Zum besserer Übersicht stehen ihr redundant alle Titel in den 5 Sprachen, soweit vorhanden
+     - In der Serie fassen wir die Info über wieviele Bücher es gibt.
+       Wichtig über die Ermittlung noch fehlender Bücher. Auch eine generelle Beschreibung der Serie.
+
+     - Daneben gibt es noch die Autoren mit einem slug-namen und Pseudonyme der Autoren.
+       Die Main-Sprache der Autoren in meiner Sammlung und ein paar interessante Infos, Date, ild und Vita.
+
 """
 import sqlite3
 import os
+import unicodedata
+import re
+from collections import defaultdict
 
 from Gemini.file_utils import DB_PATH
+
 
 
 def get_connection():
@@ -111,7 +120,7 @@ def create_db(conn):
                         );
                         """)
 
-        # 5. VERKNÜPFUNGSTABELLE
+        # 5. VERKNÜPFUNGSTABELLE: book->authors, work->book, work->authors
         cursor.execute("""
                         CREATE TABLE IF NOT EXISTS book_authors (
                             book_id INTEGER,
@@ -120,7 +129,28 @@ def create_db(conn):
                             FOREIGN KEY (author_id) REFERENCES authors (id) ON DELETE CASCADE
                         );
                         """)
+        conn.commit()
 
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS work_to_book (
+                work_id INTEGER,
+                book_id INTEGER,
+                PRIMARY KEY (work_id, book_id),
+                FOREIGN KEY (work_id) REFERENCES works (id) ON DELETE CASCADE,
+                FOREIGN KEY (book_id) REFERENCES books (id) ON DELETE CASCADE
+            );
+        """)
+        conn.commit()
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS work_author (
+                work_id INTEGER,
+                author_id INTEGER,
+                PRIMARY KEY (work_id, author_id),
+                FOREIGN KEY (work_id) REFERENCES works (id) ON DELETE CASCADE,
+                FOREIGN KEY (author_id) REFERENCES authors (id) ON DELETE CASCADE
+            );
+        """)
         conn.commit()
         print(f"[{os.path.basename(__file__)}] Struktur v1.1 erfolgreich erstellt.")
 
@@ -160,187 +190,107 @@ def update_database_structure():
     conn.commit()
     conn.close()
 
-def update_book_paths():
-    # Verbindung zur Datenbank
+def update_authors_for_browser():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-
-    # Definition der Änderungen: (Alter Teil, Neuer Teil)
-    replacements = [
-        ('_sortiertGenre', '_byGenre'),
-        ('_sortierteRegion', '_byRegion')
+    # 1. Neue Tabelle für Autoren für den Browser und die Nacktschnecken-Logik
+    new_cols = [
+        ("Bücher", "TEXT"),  # Der Link zur Bibliografie
+        ("books", "TEXT"),  # Der Link zur Bücherreihe
+        ("libros", "TEXT"),  # Der Link zur Bücherreihe
+        ("libres", "TEXT"),  # Der Link zur Bücherreihe
+        ("Geburtsort", "TEXT"),  # Falls noch nicht vorhanden
+        ("Geburtsdatum", "TEXT")  # Falls noch nicht vorhanden
     ]
 
-    print("Starte Pfad-Aktualisierung...")
+    for col_name, col_type in new_cols:
+        try:
+            cursor.execute(f"ALTER TABLE authors ADD COLUMN {col_name} {col_type}")
+            print(f"Spalte {col_name} hinzugefügt.")
+        except sqlite3.OperationalError:
+            pass  # Spalte existiert schon
 
-    try:
-        for old_term, new_term in replacements:
-            # SQL: SET path = REPLACE(path, 'alt', 'neu')
-            # Das wirkt sich nur auf Zeilen aus, die den alten Begriff enthalten
-            query = f"UPDATE books SET path = REPLACE(path, ?, ?) WHERE path LIKE ?"
-            cursor.execute(query, (old_term, new_term, f"%{old_term}%"))
+        # 2. Neue Tabelle für Serien erstellen
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS series (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                series_name TEXT UNIQUE,
+                series_name_de TEXT,
+                series_name_en TEXT,
+                series_slug TEXT
+            )
+        """)
 
-            print(f"Abgeschlossen: '{old_term}' wurde durch '{new_term}' ersetzt. ({cursor.rowcount} Zeilen geändert)")
+        # 3. 'works' Tabelle um Sprachfelder und Serien-ID erweitern
+        # Wir nutzen 'IF NOT EXISTS' Logik über PRAGMA, da SQLite kein
+        # 'ADD COLUMN IF NOT EXISTS' direkt unterstützt.
+        cursor.execute("PRAGMA table_info(works)")
+        columns = [column[1] for column in cursor.fetchall()]
 
-        conn.commit()
-        print("\nErfolgreich gespeichert. Die Pfade im Analyser sollten jetzt wieder stimmen.")
+        new_cols = {
+            "title_de": "TEXT",
+            "title_en": "TEXT",
+            "title_fr": "TEXT",
+            "title_it": "TEXT",
+            "title_es": "TEXT",
+            "series_id": "INTEGER",
+            "series_index": "REAL"  # REAL für Bände wie 2.5
+        }
 
-    except sqlite3.Error as e:
-        print(f"Ein Fehler ist aufgetreten: {e}")
-        conn.rollback()
-    finally:
-        conn.close()
-
-def check_db_simple_entry(file_path):
-    conn = sqlite3.connect(DB_PATH)
-    # Wir stellen um auf Row, damit wir Spaltennamen sehen
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-
-    # Suche genau nach diesem Buch
-    query = "SELECT * FROM books WHERE path = ?"
-    cursor.execute(query, (file_path,))
-    row = cursor.fetchone()
-
-    if row:
-        print("--- Datenbank-Eintrag gefunden ---")
-        # Wir geben die wichtigsten Spalten aus
-        for key in row.keys():
-            print(f"{key}: {row[key]}")
-    else:
-        print("⚠️ Kein Eintrag für diesen Pfad in der Datenbank gefunden.")
-
-    conn.close()
-
-
-def check_db_entry(file_path):
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-
-    # Die korrigierte Abfrage mit Joins zu den Autoren
-    query = """
-            SELECT b.*, a.firstname, a.lastname
-            FROM books b
-            LEFT JOIN book_authors ba ON b.id = ba.book_id
-            LEFT JOIN authors a ON ba.author_id = a.id
-            WHERE b.path = ?
-            """
-    cursor.execute(query, (file_path,))
-    row = cursor.fetchone()
-
-    if row:
-        print("--- Datenbank-Eintrag gefunden ---")
-        # Wir wandeln es in ein Dictionary um, um bequem damit zu arbeiten
-        data = dict(row)
-
-        # Wir berechnen den full_author direkt für die Anzeige
-        first = data.get('firstname') or ''
-        last = data.get('lastname') or 'Unbekannt'
-        full_author = f"{first} {last}".strip()
-
-        print(f"Berechneter Autor: {full_author}")
-        print("-" * 34)
-
-        # Alle Spalten ausgeben
-        for key in data.keys():
-            print(f"{key}: {data[key]}")
-    else:
-        print(f"⚠️ Kein Eintrag für diesen Pfad gefunden:\n{file_path}")
-    conn.close()
-
-
-def count_0101():
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-
-        # Wir prüfen sowohl den String '0101' als auch die Zahl 101 (falls es als Integer gespeichert wurde)
-        cursor.execute("SELECT COUNT(*) FROM books WHERE year = '0101' OR year = 101 OR year = '101'")
-        count = cursor.fetchone()[0]
-
-        print(f"--- Datenbank-Check ---")
-        print(f"Anzahl der Einträge mit Jahr '0101': {count}")
-
-        # Optional: Zeige die ersten 5 Pfade an, um sicherzugehen
-        if count > 0:
-            print("\nBeispiel-Pfade:")
-            cursor.execute("SELECT path FROM books WHERE year = '0101' OR year = 101 LIMIT 5")
-            for row in cursor.fetchall():
-                print(f" - {row[0]}")
-
-        conn.close()
-    except Exception as e:
-        print(f"Fehler beim DB-Zugriff: {e}")
-
-
-def fix_db_0101():
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-
-    # 1. Wir löschen das falsche Jahr
-    cursor.execute("UPDATE books SET year = NULL WHERE year = '0101' OR year = 101 OR year = '101'")
-    affected_rows = cursor.rowcount
-
-    # 2. Wir setzen die Version zurück, damit der Scanner diese Files UNBEDINGT anfasst
-    # (Nur für die betroffenen 13.095 Zeilen)
-    cursor.execute("UPDATE books SET scanner_version = '1.3.0' WHERE year IS NULL AND scanner_version = '1.3.1'")
-
+        for col_name, col_type in new_cols.items():
+            if col_name not in columns:
+                cursor.execute(f"ALTER TABLE works ADD COLUMN {col_name} {col_type}")
+                print(f"Spalte {col_name} hinzugefügt.")
     conn.commit()
     conn.close()
-    print(f"Fertig! {affected_rows} Einträge wurden bereinigt.")
-    print("Die betroffenen Einträge wurden auf Version 1.3.0 zurückgesetzt, um einen Rescan zu erzwingen.")
 
-def migrate_to_path_in_links():
-    conn = sqlite3.connect(DB_PATH)
+
+def update_to_1_4_0(conn):
     cursor = conn.cursor()
 
-    try:
-        # 1. Die Link-Tabelle erweitern (Falls noch nicht geschehen)
-        try:
-            cursor.execute("ALTER TABLE book_authors ADD COLUMN path TEXT")
-            print("Spalte 'path' zu book_authors hinzugefügt.")
-        except sqlite3.OperationalError:
-            print("Spalte 'path' existiert bereits in book_authors.")
+    # 1. WORKS (Grüner Bereich) - Fehlende Attribute ergänzen
+    # Wir brauchen hier die Felder, die aus 'books' abwandern
+    work_cols = [
+        ("description_master", "TEXT"),
+        ("notes_master", "TEXT"),
+        ("genre_fixed", "TEXT"),
+        ("region", "TEXT"),
+        ("stars", "INTEGER"),
+        ("rating_global", "INTEGER")
+    ]
 
-        # 2. Bestehende Pfade aus 'books' in 'book_authors' migrieren
-        # Wir verknüpfen jeden aktuellen Buch-Pfad mit den Autoren in der Link-Tabelle
-        cursor.execute("""
-            UPDATE book_authors 
-            SET path = (SELECT path FROM books WHERE books.id = book_authors.book_id)
-            WHERE path IS NULL
-        """)
-        print(f"{cursor.rowcount} Pfade in die Link-Tabelle migriert.")
-
-        # 3. Unique-Index erstellen, um exakt gleiche Dubletten zu vermeiden
-        # (Autor A, Buch B, Pfad C darf nur einmal vorkommen)
+    for col_name, col_type in work_cols:
         try:
-            cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_link ON book_authors(book_id, author_id, path)")
+            cursor.execute(f"ALTER TABLE works ADD COLUMN {col_name} {col_type}")
         except sqlite3.OperationalError:
             pass
 
-        conn.commit()
-    except Exception as e:
-        print(f"Fehler bei Migration: {e}")
-        conn.rollback()
-    finally:
-        conn.close()
+    # 2. SERIES (Blauer Bereich) - Konsolidierung
+    # Sicherstellen, dass die Sprachfelder da sind
+    # (Hast du in 1.2.0 schon teilweise angelegt, hier zur Sicherheit)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS series (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name_slug TEXT UNIQUE,
+            name_de TEXT,
+            name_en TEXT,
+            name_fr TEXT,
+            name_it TEXT,
+            name_es TEXT,
+            master_name TEXT,
+            notes TEXT
+        )
+    """)
+    conn.commit()
 
 if __name__ == "__main__":
     # Aufruf für 1. create_db
     connection = get_connection()
-    create_db(connection)
+    update_to_1_4_0(connection)
     connection.close()
 
     # Aufruf für weitere Funktionen
-    update_database_structure()
+    # update_database_structure()
     # update_book_paths()
 
-    # Direkte Datenbankabfrage
-    # buch_pfad = r"D:\Bücher\Business\Biographien\Ashlee Vance — Elon Musk. Die Biografie des Gründers von Tesla, PayPal, SpaceX (2015).epub"
-    # check_db_entry(buch_pfad)
-
-    # count_0101()
-    # Anzahl der Einträge mit Jahr '0101': 13095
-    # - D:\Bücher\Deutsch\A\Alexander Oetker\Alexander Oetker — 01-Signora Commissaria und die dunklen Geister.epub
-    # fix_db_0101()
+    # update_authors_for_browser()

@@ -1,6 +1,6 @@
 import os
-from Gemini.file_utils import AUDIO_BASE, DB2_PATH, sanitize_path, clean_description
-from authors import AuthorManager
+from Gemini.file_utils import AUDIO_BASE, DB2_PATH, sanitize_path
+from Zoom.authors import AuthorManager
 
 
 class AudiobookScanner:

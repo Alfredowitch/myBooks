@@ -1,27 +1,110 @@
+"""
+DATEI: db_check.py
+VERSION: 1.4.0
+BESCHREIBUNG: Hilft bei der Migration und Überprüfung der Struktur (transient-Modul)
+     - Wir haben books mit der Verbindung zur Filestruktur, mit separaten Büchern für jeden Autor, Sprache und evtl. Thema
+       Hier steht auch der Dateiname und Pfadname für jedes Buch, damit auch reduntant die Autoren und Titel etc.
+     - Davon abstrahiert haben wir das abstrakte Werk, z.B. Herry Potter Band 1. unabhängig von Sprache und Format.
+       Hier speichern wir Beschreibung, Rating, Serienname und Seriennummer und Autorenverbindungen über work_author.
+       Zum besserer Übersicht stehen ihr redundant alle Titel in den 5 Sprachen, soweit vorhanden
+     - In der Serie fassen wir die Info über wieviele Bücher es gibt.
+       Wichtig über die Ermittlung noch fehlender Bücher. Auch eine generelle Beschreibung der Serie.
+
+     - Daneben gibt es noch die Autoren mit einem slug-namen und Pseudonyme der Autoren.
+       Die Main-Sprache der Autoren in meiner Sammlung und ein paar interessante Infos, Date, ild und Vita.
+"""
 import os
+import sqlite3
 from tqdm import tqdm
 from collections import defaultdict
 from Apps.book_data import BookData
 from Apps.book_scanner import scan_single_book, mismatch_list, write_mismatch_report
-from Gemini.read_epub import get_epub_metadata
-from Gemini.read_file import detect_real_extension, is_mobi_readable
-from file_utils import sanitize_path
+from Gemini.file_utils import DB_PATH, sanitize_path
+
+
 
 
 class BookCleaner:
+    @staticmethod
+    def check_db_entry(file_path):
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        # Die korrigierte Abfrage mit Joins zu den Autoren
+        query = """
+                SELECT b.*, a.firstname, a.lastname
+                FROM books b
+                LEFT JOIN book_authors ba ON b.id = ba.book_id
+                LEFT JOIN authors a ON ba.author_id = a.id
+                WHERE b.path = ?
+                """
+        cursor.execute(query, (file_path,))
+        row = cursor.fetchone()
+
+        if row:
+            print("--- Datenbank-Eintrag gefunden ---")
+            # Wir wandeln es in ein Dictionary um, um bequem damit zu arbeiten
+            data = dict(row)
+
+            # Wir berechnen den full_author direkt für die Anzeige
+            first = data.get('firstname') or ''
+            last = data.get('lastname') or 'Unbekannt'
+            full_author = f"{first} {last}".strip()
+
+            print(f"Berechneter Autor: {full_author}")
+            print("-" * 34)
+
+            # Alle Spalten ausgeben
+            for key in data.keys():
+                print(f"{key}: {data[key]}")
+        else:
+            print(f"⚠️ Kein Eintrag für diesen Pfad gefunden:\n{file_path}")
+        conn.close()
+
+    @staticmethod
+    def check_db_simple_entry(file_path):
+        conn = sqlite3.connect(DB_PATH)
+        # Wir stellen um auf Row, damit wir Spaltennamen sehen
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        # Suche genau nach diesem Buch
+        query = "SELECT * FROM books WHERE path = ?"
+        cursor.execute(query, (file_path,))
+        row = cursor.fetchone()
+
+        if row:
+            print("--- Datenbank-Eintrag gefunden ---")
+            # Wir geben die wichtigsten Spalten aus
+            for key in row.keys():
+                print(f"{key}: {row[key]}")
+        else:
+            print("⚠️ Kein Eintrag für diesen Pfad in der Datenbank gefunden.")
+
+        conn.close()
 
     @staticmethod
     def intelligent_rescan(base_path):
         """Der schnelle Abgleich über Ordner-Anzahlen (für 100k Files)."""
         print(f"🚀 Starte intelligenten Rescan ab: {base_path}")
         db_counts = BookData.get_book_counts_per_folder(base_path)
+        # db_counts ist ein Dictionnary mit allesn directorien und den Anzahl der Bücher:
+        """
+        {
+            "/home/user/books/scifi": 42,
+            "/home/user/books/thriller": 12,
+            "/home/user/books/fantasy": 305
+        }
+        """
         print(f"In der DB sind {len(db_counts)} Ordner")
         stats = {"added": 0, "cleaned": 0}
 
         for root, dirs, files in os.walk(base_path):
+            # os.walk liefert (rrot, dirs, files zurück) zurück.
+            # root =akt. Dir, dirs = Liste der Unterordner, files = Liste der Files in root
             book_files = [f for f in files if f.lower().endswith(('.epub', '.pdf', '.mobi'))]
             if not book_files: continue
-
             norm_root = os.path.abspath(os.path.normpath(root))
             ll = db_counts.get(norm_root, 0)
             if len(book_files) == ll:
@@ -46,47 +129,114 @@ class BookCleaner:
 
     @staticmethod
     def deep_repair_library(base_path):
-        """
-        Deine bisherige repair_total_library, jetzt als Methode der Klasse.
-        Prüft JEDES Buch auf Existenz und EPUB-Korruptheit.
-        """
-        print(f"--- START DEEP REPAIR SCAN ---")
-        all_books = BookData.search_sql("SELECT id, path FROM books")
-        fixes = 0
-        cleaned = 0
+        print(f"--- START DEEP REPAIR (Multi-Path Cleanup) ---")
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
 
-        for book in tqdm(all_books, desc="Deep Repair", unit="Buch"):
-            # 1. Existenz-Check
+        # Wir holen alle aktuellen Pfad-Buch-Kombinationen
+        # (Noch aus der books-Tabelle, da dort die 'alten' Master-Pfade stehen)
+        all_books = BookData.search_sql("SELECT id, path, isbn FROM books")
+
+        cleaned_files = 0
+
+        for book in tqdm(all_books, desc="Bereinige Dateileichen"):
+            # 1. Existenzprüfung
             if not book.path or not os.path.exists(book.path):
-                if BookCleaner.cleanup_missing_book(book.path, book):
-                    cleaned += 1
-                continue
-            # 2. Realen Typ bestimmen (Magic Bytes)
-            real_ext = detect_real_extension(book.path)
-            current_ext = os.path.splitext(book.path)[1].lower()
-            # 3. Wenn Endung falsch ist -> Reparieren statt Löschen!
-            if real_ext and real_ext != current_ext:
-                new_path = book.path.replace(current_ext, real_ext)
-                fixes += 1
-                if BookData.fix_path_ext(book.path, new_path):
-                    print(f"🔧 Endung korrigiert: {os.path.basename(new_path)} (war {current_ext})")
-                    book.path = new_path  # Update für den nächsten Schritt
-                    current_ext = real_ext
-            # 4. Inhalts-Check (Korruptionsprüfung)
-            if current_ext == '.epub':
-                result = get_epub_metadata(book.path)
-                if result is None:
-                    cleaned += 1
-                    BookCleaner.delete_corrupt_book(book)
-                elif current_ext in ['.mobi', '.azw3']:
-                    if not is_mobi_readable(book.path):
-                        cleaned += 1
-                        BookCleaner.delete_corrupt_book(book)
+                # A) Lösche alle Links zu diesem Pfad in der NEUEN Tabelle
+                cursor.execute("DELETE FROM book_authors WHERE path = ?", (book.path,))
 
-        write_mismatch_report(base_path)
+                # B) Lösche den Eintrag in der ALTEN Link-Tabelle (book_authors_old)
+                # Falls du sie noch hast, sonst diesen Teil weglassen:
+                try:
+                    cursor.execute("DELETE FROM book_authors_old WHERE book_id = ?", (book.id,))
+                except:
+                    pass
+
+                # C) Lösche das Buch selbst
+                cursor.execute("DELETE FROM books WHERE id = ?", (book.id,))
+
+                cleaned_files += 1
+                continue
+
+            # 2. Falls Datei existiert: Sicherstellen, dass sie in der NEUEN Link-Tabelle steht
+            # (Jeder-mit-Jedem Logik für diesen Pfad)
+            authors = BookData.get_author_ids_for_book(book.id)  # Hilfsmethode
+            for a_id in authors:
+                cursor.execute("""
+                    INSERT OR IGNORE INTO book_authors (book_id, author_id, path) 
+                    VALUES (?, ?, ?)""", (book.id, a_id, book.path))
+
+        conn.commit()
+        print(f"✅ {cleaned_files} tote Einträge entfernt.")
+
+        # 3. Der ISBN-MERGE (Jetzt, wo die Leichen weg sind)
+        BookData.merge_duplicates_by_isbn()
+
+        # 4. Finales Vacuum
         BookData.vacuum()
-        print(f"✅ Deep Repair beendet. Fixes: {fixes}, Bereinigt: {cleaned}")
-        return {"fixes": fixes, "cleaned": cleaned}
+
+    @staticmethod
+    def deep_clean_library():
+        """
+        Löscht Bücher mit ungültigem Pfad und bereinigt die Verknüpfungen.
+        """
+        print(f"--- START DEEP CLEAN SCAN ---")
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+
+        # 1. Alle Pfade holen
+        cursor.execute("SELECT id, path FROM books")
+        all_books = cursor.fetchall()
+        ids_to_delete = []
+
+        # Test für den allerersten Pfad
+        test_id, test_path = all_books[0]
+        print(f"Test-Pfad: {test_path}")
+        print(f"Existiert: {os.path.exists(test_path)}")
+
+        # Falls False, probieren wir die Normalisierung
+        normalized = os.path.normpath(test_path)
+        print(f"Normalisiert: {normalized}")
+        print(f"Existiert normalisiert: {os.path.exists(normalized)}")
+
+        # 2. Filesystem-Check (nur das ist in Python nötig)
+        for b_id, b_path in tqdm(all_books, desc="Prüfe Dateipfade", unit="Buch"):
+            if not b_path or not os.path.exists(b_path):
+                ids_to_delete.append(b_id)
+
+        if not ids_to_delete:
+            print("✅ Keine ungültigen Pfade gefunden.")
+            return {"cleaned": 0}
+
+        # 3. Massenlöschung in der Datenbank
+        print(f"Bereinige {len(ids_to_delete):,} Einträge...")
+        if len(ids_to_delete) > (len(all_books) * 0.8):
+            print(f"⚠️ STOPP! Das Script will {len(ids_to_delete):,} von {len(all_books):,} Büchern löschen.")
+            print("Das sieht nach einem Fehler aus (z.B. Laufwerk D: nicht richtig erkannt).")
+            conn.close()
+            return
+
+
+        # id_list = ",".join(map(str, ids_to_delete))
+        # 3. Löschen in Chunks (um das SQLite Parameter-Limit zu umgehen)
+        for i in range(0, len(ids_to_delete), 900):
+            chunk = ids_to_delete[i:i + 900]
+            placeholders = ",".join(["?"] * len(chunk))
+            # Zuerst die Verknüpfungen in book_authors löschen
+            cursor.execute(f"DELETE FROM book_authors WHERE book_id IN ({placeholders})", chunk)
+            # Dann das Buch selbst löschen
+            cursor.execute(f"DELETE FROM books WHERE id IN ({placeholders})", chunk)
+        # Optional: Autoren löschen, die nun kein Buch mehr haben
+        cursor.execute("""
+                DELETE FROM authors 
+                WHERE id NOT IN (SELECT DISTINCT author_id FROM book_authors)
+            """)
+        conn.commit()
+        conn.close()
+        BookData.vacuum()
+        print(f"✅ Deep Clean beendet. Bereinigt: {len(ids_to_delete)}")
+        return {"cleaned": len(ids_to_delete)}
+
 
     # --- PRIVATE HILFSMETHODEN (Interne Logik) ---
 
@@ -286,6 +436,76 @@ class BookCleaner:
                 print(f"{b['id']:<8} | {status:<10} | {author:<20} | {b['path']}")
 
 
+    @staticmethod
+    def update_book_paths():
+        # Wir haben physikalisch die Ordner umbenannt von _sortiertGenre -> _byGenre
+        # Um ein Re-Scanning zu vermeiden, ändern wir einfach in allen Pfaden den entsprechenden Teil.
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+
+        # Definition der Änderungen: (Alter Teil, Neuer Teil)
+        replacements = [
+            ('_sortiertGenre', '_byGenre'),
+            ('_sortierteRegion', '_byRegion')
+        ]
+
+        print("Starte Pfad-Aktualisierung...")
+
+        try:
+            for old_term, new_term in replacements:
+                # SQL: SET path = REPLACE(path, 'alt', 'neu')
+                # Das wirkt sich nur auf Zeilen aus, die den alten Begriff enthalten
+                query = f"UPDATE books SET path = REPLACE(path, ?, ?) WHERE path LIKE ?"
+                cursor.execute(query, (old_term, new_term, f"%{old_term}%"))
+
+                print(
+                    f"Abgeschlossen: '{old_term}' wurde durch '{new_term}' ersetzt. ({cursor.rowcount} Zeilen geändert)")
+
+            conn.commit()
+            print("\nErfolgreich gespeichert. Die Pfade im Analyser sollten jetzt wieder stimmen.")
+
+        except sqlite3.Error as e:
+            print(f"Ein Fehler ist aufgetreten: {e}")
+            conn.rollback()
+        finally:
+            conn.close()
+
+    @staticmethod
+    def print_report():
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+
+        # 1. Anzahl der Verknüpfungen (Autor <-> Buch)
+        cursor.execute("SELECT COUNT(*) FROM book_authors")
+        links_neu = cursor.fetchone()[0]
+
+        # 2. Anzahl der tatsächlichen Bucheinträge
+        cursor.execute("SELECT COUNT(*) FROM books")
+        books_neu = cursor.fetchone()[0]
+
+        # 3. Anzahl der Autoren
+        cursor.execute("SELECT COUNT(*) FROM authors")
+        authors_count = cursor.fetchone()[0]
+
+        print(f"Bücher in 'books':         {books_neu:>15,}")
+        print(f"Links in 'book_authors':   {links_neu:>15,}")
+        print(f"Autoren in 'authors':      {authors_count:>15,}")
+
+        # 4. Stichprobe: Pfade kommen aus der Tabelle 'books'
+        cursor.execute("SELECT path FROM books WHERE path IS NOT NULL AND path != '' LIMIT 1")
+        print("\nÜberlebende Pfade (Stichprobe aus 'books'):")
+        paths = cursor.fetchall()
+        if paths:
+            for row in paths:
+                print(f" - {row[0]}")
+        else:
+            print(" - Keine Pfade gefunden!")
+
+        conn.close()
+
+
+
+
 
 if __name__ == "__main__":
     analyser = BookCleaner()
@@ -299,5 +519,12 @@ if __name__ == "__main__":
 
     # 3. Danach die Dubletten-Prüfung
     # analyser.find_isbn_duplicates()
-    target_path = sanitize_path("D:/Bücher/Deutsch/_byGenre")
+    # target_path = sanitize_path("D:/Bücher/Deutsch/_byGenre")
+    target_path = sanitize_path("D:/Bücher/Business")
+    analyser.print_report()
+    analyser.deep_clean_library()
+    analyser.print_report()
     analyser.intelligent_rescan(target_path)
+    # analyser.deep_repair_library(target_path)
+    analyser.print_report()
+    #  analyser.print_report()

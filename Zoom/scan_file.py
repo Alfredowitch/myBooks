@@ -13,7 +13,6 @@ BESCHREIBUNG: Kümmert sich um das Auslesen der Daten aus dem Pfadnamen und File
 """
 import re
 import os
-import unicodedata
 
 from Gemini.file_utils import EM_DASH, sanitize_path, normalize_author_tuple
 CURRENT_SCANNER_VERSION = "1.3.1"  # Dein neuer Versionsstempel

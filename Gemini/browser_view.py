@@ -1,14 +1,13 @@
 """
 DATEI: browser_view.py
-PROJEKT: MyBook-Management (v1.2.0)
-BESCHREIBUNG: Kümmert sich um die Darstellung in der Book_Browser App mit tkinter.
-              book_browser.py	=	Der Controller: Steuert den Flow (Laden -> Navigieren -> Speichern).
-              browser_view.py	=	Die Maske: Zeichnet alles und fängt Benutzereingaben ab.
-              browser_model.py	=	Das Gehirn: Muss die Methoden aggregate_book_data und save_book enthalten.
+PROJEKT: MyBook-Management (v1.4.2)
+BESCHREIBUNG: Optimiertes Layout ohne Haupt-Scrollbar. Fixierte Navigation unten.
+              Buch-Zone über volle Breite mit Textfeldern rechts.
 """
-import io
+
 import os
 import tkinter as tk
+from tkinter import ttk, scrolledtext
 import fitz  # PyMuPDF
 from PIL import Image, ImageTk
 
@@ -17,325 +16,216 @@ class BrowserView:
     def __init__(self, win):
         self.win = win
         self.widgets = {}
-        self.vars = {}
-        self.tk_img = None  # Wichtig für die Bildreferenz
+        self.tk_img = None
+        self.pos_label = None
 
-        # Grundkonfiguration des Fensters
-        self.win.title("E-Book Browser")
-        self.win.geometry("1000x950")
+        self.win.title("MyBook Browser v1.4.2")
+        self.win.geometry("1300x900")
 
-        self._create_main_layout()
+        self.colors = {
+            'serie': '#e3f2fd',  # Blau
+            'work': '#e8f5e9',  # Grün
+            'book': '#fffde7',  # Gelb
+            'bg': '#f5f5f5'
+        }
 
-    # ----------------------------------------------------------------------
-    # 0. Create Form
-    # ----------------------------------------------------------------------
-    def _create_main_layout(self):
-        """Erstellt das Grundgerüst der Widgets."""
-        self.main_frame = tk.Frame(self.win, padx=10, pady=10)
-        self.main_frame.pack(fill='both', expand=True)
-        self.main_frame.rowconfigure(1, weight=1)
-        self.main_frame.rowconfigure(2, weight=1)  # Klappentext wächst mit
-        self.main_frame.rowconfigure(3, weight=1)  # Notizen wachsen mit
-        self.main_frame.columnconfigure(1, weight=1)
+        # Haupt-Container (kein Scrollen des Gesamtfensters mehr)
+        self.main_container = tk.Frame(self.win, bg=self.colors['bg'])
+        self.main_container.pack(fill="both", expand=True)
 
-        # Das Pfad-Feld (oben)
-        self.path_entry = tk.Entry(self.main_frame, fg="blue", bg="#f0f0f0",
-                                   relief="flat", font=("Arial", 9))
-        self.path_entry.grid(row=0, column=0, columnspan=2, pady=(0, 10), sticky="ew")
-        self.path_entry.insert(0, "Bereit...")
-        self.path_entry.config(state='readonly')
+        # 1. Pfad-Feld ganz oben
+        self.path_entry = tk.Entry(self.main_container, fg="blue", bg="#f0f0f0", relief="flat", font=("Arial", 9))
+        self.path_entry.pack(fill='x', pady=(0, 5))
 
-        # Detail-Bereich
-        detail_frame = tk.Frame(self.main_frame)
-        detail_frame.grid(row=1, column=0, sticky="nsew", columnspan=2)
-        detail_frame.columnconfigure(0, weight=1)
+        # 2. Fixierte Navigationsleiste ganz unten
+        self.nav_frame = tk.Frame(self.win, bg="#cfd8dc", height=50, bd=1, relief="raised")
+        self.nav_frame.pack(side='bottom', fill='x')
 
-        # Links: Textfelder
-        fields_frame = tk.Frame(detail_frame)
-        fields_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
-        fields_frame.columnconfigure(1, weight=1)
+        # 3. Mittlerer Bereich für Daten
+        self.content_scroll_frame = tk.Frame(self.main_container, bg=self.colors['bg'])
+        self.content_scroll_frame.pack(fill="both", expand=True, padx=10)
 
-        # Rechts: Cover
-        self.cover_label = tk.Label(detail_frame, text="Coverbild", relief=tk.RIDGE,
-                                    width=40, height=20)
-        self.cover_label.grid(row=0, column=1, sticky="ne")
+        self._create_widgets()
 
-        # Definition der Felder
-        fields = [
-            ('Autoren', 'authors_raw', 'entry'),
-            ('Titel', 'title', 'entry'),
-            ('Dateiendung', 'extension', 'entry'),
-            ('Serienname', 'series_name', 'entry'),
-            ('Seriennr.', 'series_number', 'entry'),
-            ('Genre', 'genre', 'entry'),
-            ('Regionen', 'regions', 'entry'),
-            ('Sprache', 'language', 'entry'),
-            ('Jahr', 'year', 'entry'),
-            ('ISBN', 'isbn', 'entry'),
-            ('Schlüsselwörter', 'keywords', 'entry'),
-            ('Durchschn. Rating', 'average_rating', 'entry'),
-            ('Anzahl Ratings', 'ratings_count', 'entry'),
-            ('Meine Sterne', 'stars', 'entry'),
-            ('Gelesen', 'is_read', 'check')
-        ]
+    def _add_field(self, parent, label, key, width=20, is_combo=False):
+        frame = tk.Frame(parent, bg=parent.cget("bg"))
+        frame.pack(side="left", padx=5, pady=2)
+        tk.Label(frame, text=label, bg=parent.cget("bg"), font=("Arial", 8, "bold")).pack(side="top", anchor="w")
+        if is_combo:
+            w = ttk.Combobox(frame, width=width)
+        else:
+            w = tk.Entry(frame, width=width)
+        w.pack(side="top")
+        self.widgets[key] = w
+        return w
 
-        for i, (label_text, key, type_) in enumerate(fields):
-            tk.Label(fields_frame, text=f"{label_text}:", anchor="w").grid(row=i, column=0, sticky="w", pady=3, padx=5)
+    def _build_small_field(self, parent, label_text, key, width=15):
+        f = tk.Frame(parent, bg=parent.cget("bg"))
+        f.pack(side="left", padx=2)
+        tk.Label(f, text=label_text, bg=parent.cget("bg"), font=("Arial", 7)).pack(side="left")
+        ent = tk.Entry(f, width=width)
+        ent.pack(side="left", padx=2)
+        self.widgets[key] = ent
+        return ent
 
-            if type_ == 'check':
-                self.vars[key + '_var'] = tk.BooleanVar(value=False)
-                widget = tk.Checkbutton(fields_frame, variable=self.vars[key + '_var'])
-                widget.grid(row=i, column=1, sticky="w", pady=3, padx=5)
-            else:
-                widget = tk.Entry(fields_frame, width=60)
-                widget.grid(row=i, column=1, sticky="ew", pady=3, padx=5)
+    def _create_widgets(self):
+        # OBERER BEREICH: Serie & Werk (Links) + Cover (Rechts)
+        top_row = tk.Frame(self.content_scroll_frame, bg=self.colors['bg'])
+        top_row.pack(fill='x')
 
-            self.widgets[key] = widget
+        upper_left = tk.Frame(top_row, bg=self.colors['bg'])
+        upper_left.pack(side='left', fill='both', expand=True)
 
-        # Mehrzeilige Felder
-        tk.Label(self.main_frame, text="Klappentext:", anchor="nw").grid(row=2, column=0, sticky="nw", pady=5, padx=5)
-        self.widgets['description_raw'] = tk.Text(self.main_frame, height=15, width=80, wrap="word", font=("Arial", 10))
-        self.widgets['description_raw'].grid(row=2, column=1, sticky="ew", pady=5, padx=(50, 5))
+        # --- ZONE BLAU: SERIE ---
+        self.f_serie = tk.LabelFrame(upper_left, text=" SERIE ", bg=self.colors['serie'], font=("Arial", 10, "bold"))
+        self.f_serie.pack(fill='x', pady=2, padx=5)
 
-        tk.Label(self.main_frame, text="Notizen:", anchor="nw").grid(row=3, column=0, sticky="nw", pady=5, padx=5)
-        self.widgets['notes'] = tk.Text(self.main_frame, height=10, width=80, wrap="word", font=("Arial", 10))
-        self.widgets['notes'].grid(row=3, column=1, sticky="ew", pady=5, padx=(50, 5))
+        row_s1 = tk.Frame(self.f_serie, bg=self.colors['serie'])
+        row_s1.pack(fill="x")
+        self._add_field(row_s1, "Master Name:", "s_name", width=40, is_combo=True)
+        self._add_field(row_s1, "Slug:", "s_slug", width=25)
+
+        lang_s = tk.Frame(self.f_serie, bg=self.colors['serie'])
+        lang_s.pack(fill="x", pady=2)
+        for lang in ['de', 'en', 'fr', 'es', 'it']:
+            self._build_small_field(lang_s, f"{lang.upper()}:", f"s_name_{lang}", width=12)
+
+        # --- ZONE GRÜN: WERK ---
+        self.f_work = tk.LabelFrame(upper_left, text=" WERK ", bg=self.colors['work'], font=("Arial", 10, "bold"))
+        self.f_work.pack(fill='x', pady=2, padx=5)
+
+        row_w1 = tk.Frame(self.f_work, bg=self.colors['work'])
+        row_w1.pack(fill="x")
+        self._add_field(row_w1, "Haupt-Titel:", "w_title", width=40, is_combo=True)
+        self._add_field(row_w1, "Genre:", "w_genre", width=15)
+
+        lang_w = tk.Frame(self.f_work, bg=self.colors['work'])
+        lang_w.pack(fill="x", pady=2)
+        for lang in ['de', 'en', 'fr', 'es', 'it']:
+            self._build_small_field(lang_w, f"{lang.upper()}:", f"w_title_{lang}", width=12)
+
+        # COVER RECHTS NEBEN SERIE/WERK
+        self.cover_label = tk.Label(top_row, text="Coverbild", relief="ridge", width=35, height=18)
+        self.cover_label.pack(side='right', anchor='n', padx=10, pady=5)
+
+        # --- ZONE GELB: BUCH (VOLLE BREITE) ---
+        self.f_book = tk.LabelFrame(self.content_scroll_frame, text=" BUCH (Korrektur-Zone) ", bg=self.colors['book'],
+                                    font=("Arial", 10, "bold"))
+        self.f_book.pack(fill='both', expand=True, pady=5, padx=5)
+
+        # Buch-Split: Links Felder, Rechts Beschreibungen
+        book_split = tk.Frame(self.f_book, bg=self.colors['book'])
+        book_split.pack(fill='both', expand=True)
+
+        book_left = tk.Frame(book_split, bg=self.colors['book'])
+        book_left.pack(side='left', fill='y')
+
+        self._add_field(book_left, "Autoren:", "authors_raw", width=60).pack(fill='x')
+
+        row_b1 = tk.Frame(book_left, bg=self.colors['book'])
+        row_b1.pack(fill="x")
+        self._add_field(row_b1, "Buch-Titel:", "b_title", width=40)
+        self._add_field(row_b1, "Band:", "b_series_number", width=8)
+
+        row_b2 = tk.Frame(book_left, bg=self.colors['book'])
+        row_b2.pack(fill="x")
+        self._add_field(row_b2, "ISBN:", "b_isbn", width=20)
+        self._add_field(row_b2, "Jahr:", "b_year", width=8)
+        self._add_field(row_b2, "Sprache:", "b_language", width=8)
+
+        # Buch-Rechts: Textfelder
+        book_right = tk.Frame(book_split, bg=self.colors['book'])
+        book_right.pack(side='left', fill='both', expand=True, padx=10)
+
+        tk.Label(book_right, text="Beschreibung (Buch):", bg=self.colors['book'], font=("Arial", 8, "bold")).pack(
+            anchor="w")
+        self.widgets['b_description'] = scrolledtext.ScrolledText(book_right, height=8, font=("Arial", 9))
+        self.widgets['b_description'].pack(fill="x", pady=(0, 5))
+
+        tk.Label(book_right, text="Notizen:", bg=self.colors['book'], font=("Arial", 8, "bold")).pack(anchor="w")
+        self.widgets['b_notes'] = scrolledtext.ScrolledText(book_right, height=4, font=("Arial", 9))
+        self.widgets['b_notes'].pack(fill="x")
 
     def create_nav_buttons(self, controller):
-        """Erstellt die Buttons und verknüpft sie mit den Methoden des Controllers."""
-        nav_container = tk.Frame(self.main_frame)
-        nav_container.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        for w in self.nav_frame.winfo_children(): w.destroy()
 
-        tk.Button(nav_container, text="|<", width=3, command=controller.nav_first).pack(side="left", padx=2)
-        tk.Button(nav_container, text="<", width=3, command=controller.nav_prev).pack(side="left", padx=2)
+        btn_f = tk.Frame(self.nav_frame, bg="#cfd8dc")
+        btn_f.pack(expand=True)
 
-        self.pos_label = tk.Label(nav_container, text="0 von 0", font=("Arial", 9, "bold"), padx=10)
-        self.pos_label.pack(side="left")
+        tk.Button(btn_f, text="|<", command=controller.nav_first, width=5).pack(side='left', padx=2)
+        tk.Button(btn_f, text="<", command=controller.nav_prev, width=5).pack(side='left', padx=2)
 
-        tk.Button(nav_container, text=">", width=3, command=controller.nav_next).pack(side="left", padx=2)
-        tk.Button(nav_container, text=">|", width=3, command=controller.nav_last).pack(side="left", padx=2)
+        self.pos_label = tk.Label(btn_f, text="0 von 0", font=("Arial", 10, "bold"), bg="#cfd8dc")
+        self.pos_label.pack(side='left', padx=20)
 
-        tk.Button(nav_container, text="Speichern", bg="#e1f5fe", command=controller.save_data).pack(side="left",
-                                                                                                    padx=(20, 0))
-        tk.Button(nav_container, text="🗑", fg="red", command=controller.delete_current_book, relief="flat").pack(
-            side="left", padx=(10, 0))
-        tk.Button(nav_container, text="Beenden", width=10, command=controller.on_close).pack(side="right", padx=5)
+        tk.Button(btn_f, text=">", command=controller.nav_next, width=5).pack(side='left', padx=2)
+        tk.Button(btn_f, text=">|", command=controller.nav_last, width=5).pack(side='left', padx=2)
 
-    # ----------------------------------------------------------------------
-    # 1. Display Coverbild
-    # ----------------------------------------------------------------------
+        tk.Button(btn_f, text="SPEICHERN", bg="#4caf50", fg="white", font=("Arial", 10, "bold"),
+                  command=controller.save_data, width=20).pack(side='left', padx=40)
+        tk.Button(btn_f, text="Löschen", fg="red", command=controller.delete_current_book).pack(side='left')
+
+    def _set_val(self, key, val):
+        if key in self.widgets:
+            w = self.widgets[key]
+            if isinstance(w, (tk.Text, scrolledtext.ScrolledText)):
+                w.delete('1.0', tk.END)
+                w.insert('1.0', str(val) if val else "")
+            else:
+                w.delete(0, tk.END)
+                w.insert(0, str(val) if val is not None else "")
+
+    def fill_widgets(self, data):
+        self.path_entry.config(state='normal')
+        self.path_entry.delete(0, tk.END)
+        self.path_entry.insert(0, data.book.path if hasattr(data, 'book') else "")
+        self.path_entry.config(state='readonly')
+
+        if hasattr(data, 'serie'):
+            self._set_val('s_name', data.serie.name)
+            for l in ['de', 'en', 'fr', 'es', 'it']: self._set_val(f's_name_{l}', getattr(data.serie, f'name_{l}', ""))
+            self._set_val('s_slug', data.serie.slug)
+
+        if hasattr(data, 'work'):
+            self._set_val('w_title', data.work.title)
+            for l in ['de', 'en', 'fr', 'es', 'it']: self._set_val(f'w_title_{l}', getattr(data.work, f'title_{l}', ""))
+            self._set_val('w_genre', data.work.genre)
+
+        if hasattr(data, 'authors'):
+            self._set_val('authors_raw', " & ".join([f"{fn} {ln}".strip() for fn, ln in data.authors]))
+
+        if hasattr(data, 'book'):
+            b = data.book
+            self._set_val('b_title', b.title)
+            self._set_val('b_series_number', b.series_number)
+            self._set_val('b_year', b.year)
+            self._set_val('b_isbn', b.isbn)
+            self._set_val('b_language', b.language)
+            self._set_val('b_description', b.description)
+            self._set_val('b_notes', b.notes)
+
     def display_cover(self, image_path, current_file_path):
-        """Lädt Bilddatei oder extrahiert Cover aus PDF/EPUB via fitz."""
+        import io
         self.cover_label.config(image='', text='Lädt...')
         self.tk_img = None
         max_size = (310, 420)
-
         try:
-            # Pfad-Normalisierung für Windows
-            if current_file_path:
-                current_file_path = os.path.abspath(os.path.normpath(current_file_path))
-
-            # Fall A: Existierendes Bild (JPG/PNG)
-            if image_path and os.path.exists(image_path) and not image_path.lower().endswith('.pdf'):
+            if image_path and os.path.exists(image_path) and not image_path.lower().endswith(('.pdf', '.epub')):
                 img = Image.open(image_path)
+            elif current_file_path and os.path.exists(current_file_path):
+                doc = fitz.open(current_file_path)
+                page = doc.load_page(0)
+                pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5))
+                img = Image.open(io.BytesIO(pix.tobytes("png")))
+                doc.close()
+
+            if img:
                 img.thumbnail(max_size, Image.Resampling.LANCZOS)
                 self.tk_img = ImageTk.PhotoImage(img)
-
-            # Fall B: Extraktion aus Buchdatei (PDF oder EPUB)
-            elif current_file_path and os.path.exists(current_file_path):
-                ext = current_file_path.lower()
-                if ext.endswith('.pdf') or ext.endswith('.epub') or ext.endswith('.mobi'):
-                    doc = fitz.open(current_file_path)
-                    # Erste Seite laden (bei EPUBs oft das Cover)
-                    page = doc.load_page(0)
-                    pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0))
-                    img_data = pix.tobytes("png")
-                    img = Image.open(io.BytesIO(img_data))
-                    img.thumbnail(max_size, Image.Resampling.LANCZOS)
-                    self.tk_img = ImageTk.PhotoImage(img)
-                    doc.close()
-
-            if self.tk_img:
-                # WICHTIG: width=0, height=0 damit das Bild die Größe bestimmt
-                self.cover_label.config(image=self.tk_img, text='', width=0, height=0)
-                self.cover_label.image = self.tk_img
-            else:
-                self.cover_label.config(text="Kein Cover verfügbar", width=40, height=20)
-
-        except Exception as e:
-            print(f"❌ Cover-Fehler für {os.path.basename(current_file_path) if current_file_path else '???'}: {e}")
-            self.cover_label.config(text="Fehler beim Laden", width=40, height=20)
-
-    # ----------------------------------------------------------------------
-    # 2. Füller der Form
-    # ----------------------------------------------------------------------
-    def fill_widgets(self, data):
-        """Füllt die Maske mit Daten aus einem BookData-Objekt."""
-        # 1. Grund-Mapping erstellen
-        mapping = {
-            'title': data.title,
-            'series_name': data.series_name,
-            'series_number': data.series_number,
-            'genre': data.genre,
-            'language': data.language,
-            'year': data.year,
-            'isbn': data.isbn,
-            'average_rating': data.average_rating,
-            'ratings_count': data.ratings_count,
-            'stars': data.stars
-        }
-
-        # 2. Extension-Logik (Robustes Befüllen)
-        ext = getattr(data, 'extension', None)
-        if not ext and data.path:
-            ext = os.path.splitext(data.path)[1]
-        clean_ext = ext.lstrip('.') if ext else "epub"
-
-        # Extension sofort setzen
-        if 'extension' in self.widgets:
-            self.widgets['extension'].delete(0, tk.END)
-            self.widgets['extension'].insert(0, clean_ext.lower())
-
-        # 3. Einfache Felder loopen
-        for key, value in mapping.items():
-            if key in self.widgets:
-                self.widgets[key].delete(0, tk.END)
-                self.widgets[key].insert(0, str(value) if value is not None else "")
-
-        # 1. Einfache Felder (mapping ohne regions und keywords!)
-        for key, value in mapping.items():
-            if key in self.widgets:
-                self.widgets[key].delete(0, tk.END)
-                self.widgets[key].insert(0, str(value) if value is not None else "")
-        # 2. Helfer für Collections (Sets/Listen)
-        def format_collection(col):
-            if isinstance(col, (set, list)):
-                return ", ".join(sorted(list(col))) if col else ""
-            return str(col) if col else ""
-        # 3. Regions spezial (jetzt mit schöner Formatierung)
-        if 'regions' in self.widgets:
-            self.widgets['regions'].delete(0, tk.END)
-            self.widgets['regions'].insert(0, format_collection(data.regions))
-        # 4. Keywords spezial (erweitert für Sets)
-        kw_str = format_collection(data.keywords)
-        self.widgets['keywords'].delete(0, tk.END)
-        self.widgets['keywords'].insert(0, kw_str)
-        # 5. Autoren spezial
-        author_str = " & ".join([f"{fn} {ln}".strip() for fn, ln in data.authors]) if data.authors else ""
-        self.widgets['authors_raw'].delete(0, tk.END)
-        self.widgets['authors_raw'].insert(0, author_str)
-
-        # Checkbutton
-        if 'is_read_var' in self.vars:
-            self.vars['is_read_var'].set(bool(data.is_read))
-
-        # Textfelder
-        for key, value in [('description_raw', data.description), ('notes', data.notes)]:
-            self.widgets[key].delete('1.0', tk.END)
-            self.widgets[key].insert('1.0', str(value) if value else "")
+                self.cover_label.config(image=self.tk_img, text='')
+        except:
+            self.cover_label.config(text="Kein Cover")
 
     def update_status(self, current, total, path, is_magic=False):
-        """Aktualisiert Zähler und Pfadanzeige mit Farbsignal bei Magic-Heilung."""
-        self.pos_label.config(text=f"{current} von {total}")
-        self.path_entry.config(state='normal')
-        self.path_entry.delete(0, tk.END)
-        self.path_entry.insert(0, path)
-
-        if is_magic:
-            # Kräftiges Orange/Rot für den Text, helles Gelb für den Hintergrund
-            self.path_entry.config(fg="red", bg="#fff9c4")
-            # Kleiner Trick: Wir setzen den Fokus kurz drauf, damit man es sieht
-        else:
-            # Standardfarben (dein Blau auf Grau)
-            self.path_entry.config(fg="blue", bg="#f0f0f0")
-
-        self.path_entry.config(state='readonly')
-    # ----------------------------------------------------------------------
-    # 3. Auslesen der Form
-    # ----------------------------------------------------------------------
-    def get_data_from_widgets(self) -> 'BookData':
-        """
-        Sammelt alle Daten aus den Widgets ein und gibt ein BookData-Objekt zurück.
-        Durch die Anführungszeichen versteht Python das als "Versprechen",
-        dass es diese Klasse irgendwo gibt, ohne sie sofort beim Laden der Datei validieren zu müssen.
-        """
-        from Apps.book_data import BookData  # Lokaler Import, falls nötig
-
-        # 1. Autoren-String parsen (Name & Name -> [('Vor', 'Nach'), ...])
-        raw_authors = self.widgets['authors_raw'].get().strip()
-        parsed_authors = []
-        if raw_authors:
-            # Trenne bei & oder ,
-            temp_authors = raw_authors.replace(' & ', '|').replace(',', '|').split('|')
-            for name in temp_authors:
-                parts = name.strip().split()
-                if len(parts) >= 2:
-                    parsed_authors.append((" ".join(parts[:-1]), parts[-1]))
-                elif parts:
-                    parsed_authors.append(("", parts[0]))
-
-        # 2. Keywords-String parsen (Wort, Wort -> [Wort, Wort])
-        def string_to_set(widget_key):
-            raw = self.widgets[widget_key].get().strip()
-            if not raw or raw == "set()":
-                return set()
-            return {item.strip() for item in raw.split(',') if item.strip()}
-
-        current_keywords = string_to_set('keywords')
-        current_regions = string_to_set('regions')
-
-        # 3. BookData Objekt befüllen
-        data = BookData(
-            path=self.path_entry.get(),  # Wird vom Controller überschrieben, falls nötig
-            authors=parsed_authors,
-            title=self.widgets['title'].get().strip(),
-            extension=self.widgets['extension'].get().strip(),
-            series_name=self.widgets['series_name'].get().strip() or None,
-            series_number=self.widgets['series_number'].get().strip() or None,
-            genre=self.widgets['genre'].get().strip() or None,
-            regions=current_regions,
-            language=self.widgets['language'].get().strip() or None,
-            year=self.widgets['year'].get().strip() or None,
-            isbn=self.widgets['isbn'].get().strip() or None,
-            keywords=current_keywords,
-            average_rating=self.widgets['average_rating'].get().strip() or None,
-            ratings_count=self.widgets['ratings_count'].get().strip() or None,
-            stars=self.widgets['stars'].get().strip() or None,
-            is_read=1 if self.vars['is_read_var'].get() else 0,
-            description=self.widgets['description_raw'].get('1.0', tk.END).strip() or None,
-            notes=self.widgets['notes'].get('1.0', tk.END).strip() or None
-        )
-
-        return data
-    # ----------------------------------------------------------------------
-    # 4. GUI Elemente für Search
-    # ----------------------------------------------------------------------
-    def show_search_popup(self, search_callback):
-        """Erstellt ein Toplevel-Fenster für die Suche."""
-        search_window = tk.Toplevel(self.win)
-        search_window.title("Buch suchen")
-        search_window.geometry("500x180")
-        search_window.transient(self.win)
-        search_window.grab_set()
-
-        frame = tk.Frame(search_window, padx=15, pady=15)
-        frame.pack(fill="both", expand=True)
-
-        tk.Label(frame, text="Autor (teilweise):").grid(row=0, column=0, sticky="w", pady=5)
-        author_entry = tk.Entry(frame, width=40)
-        author_entry.grid(row=0, column=1, sticky="ew", padx=5)
-
-        tk.Label(frame, text="Titel (teilweise):").grid(row=1, column=0, sticky="w", pady=5)
-        title_entry = tk.Entry(frame, width=40)
-        title_entry.grid(row=1, column=1, sticky="ew", padx=5)
-
-        def on_search():
-            author = author_entry.get().strip()
-            title = title_entry.get().strip()
-            search_window.destroy()
-            search_callback(author, title)  # Ruft die Suche im Controller auf
-
-        tk.Button(frame, text="Suchen", command=on_search, width=15).grid(row=2, column=1, sticky="e", pady=10)
-
-        author_entry.focus_set()
-        search_window.bind('<Return>', lambda e: on_search())
+        if self.pos_label: self.pos_label.config(text=f"{current} von {total}")
+        self.win.title(f"MyBook Browser - {os.path.basename(path)}")

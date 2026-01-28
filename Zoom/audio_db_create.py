@@ -1,7 +1,6 @@
 import sqlite3
-import os
 
-from Gemini.file_utils import DB2_PATH
+from Zoom.utils import DB2_PATH
 DB_PATH = DB2_PATH
 
 def setup_final_db():
@@ -48,7 +47,7 @@ def setup_final_db():
                 original_title TEXT,
                 master_title_de TEXT,
                 master_title_en TEXT,
-                normalized_title TEXT
+                normalized_title TEXT,
                 description_global TEXT,
                 notes TEXT,
                 genre TEXT,

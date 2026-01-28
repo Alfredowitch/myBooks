@@ -1,6 +1,6 @@
 """
 DATEI: book_browser.py
-PROJEKT: MyBook-Management (v1.2.0)
+PROJEKT: MyBook-Management (v1.3.0)
 BESCHREIBUNG: Ermöglicht das Navigieren, editieren und löschen von Büchern.
               Die Buchliste (Liste von absoluten File-paths) steht in einer Navigationsliste. Sie kann aus
                 a) dem Filesystem kommen (alle Files eines Ordners)
@@ -11,7 +11,7 @@ BESCHREIBUNG: Ermöglicht das Navigieren, editieren und löschen von Büchern.
               Beim Ändern der Autoren, bleiben möglicherweise verwaiste Autoren zurück.
               Refaktoriert in Version 1.2:
               book_browser.py	=	Der Controller: Steuert den Flow (Laden -> Navigieren -> Speichern).
-              browser_view.py	=	Die Maske: Zeichnet alles und fängt Benutzereingaben ab.
+              browser_view_old.py	=	Die Maske: Zeichnet alles und fängt Benutzereingaben ab.
               browser_model.py	=	Das Gehirn: Muss die Methoden aggregate_book_data und save_book enthalten.
 """
 
@@ -22,22 +22,10 @@ from tkinter import filedialog, messagebox
 from typing import Any, List, Optional, Dict  # Any ist das Wichtigste für deinen Fehler
 
 from Apps.book_data import BookData
-from Gemini.browser_view import BrowserView
+from Gemini.browser_view_old import BrowserView
 from Gemini.browser_model import BrowserModel
-from Gemini.file_utils import find_real_file
+from Gemini.file_utils import DB_PATH
 
-# Pfade setzen (Apps -> Gemini)
-def get_base_path():
-    # 'Darwin' ist der interne Name für macOS
-    if platform.system() == 'Darwin':
-        return "/Volumes/eBooks"
-    else:
-        # Hier trägst du deinen Windows-Pfad ein (z. B. 'Z:/' oder 'D:/eBooks')
-        return "M:/"
-
-# Überall im Code nutzt du dann:
-BASE_PATH = get_base_path()
-DB_PATH = os.path.join(BASE_PATH, "books.db")
 
 
 class BookBrowser:
@@ -159,6 +147,7 @@ class BookBrowser:
                 is_magic=is_magic
             )
 
+
             # COVER ANZEIGEN (Nutzt jetzt den geheilten self.current_file_path)
             self.view.display_cover(getattr(book_obj, 'cover_path', None), self.current_file_path)
 
@@ -226,7 +215,6 @@ class BookBrowser:
         key = f"ID:{found_id}" if found_id else found_path
         if key and errors:
             data_dict[key] = "\n".join(errors)
-
 
     # ----------------------------------------------------------------------
     # 3. SUCH-LOGIK
