@@ -149,7 +149,7 @@ def edit_book(b):
 
     # Alternative Schließen-Events
     # ENTER kann zum Schließen führen. Hier nicht sinnvoll, weil ich ENTER im Text benutzen will.
-    # root.bind("<Return>", lambda event: on_close())
+    # win.bind("<Return>", lambda event: on_close())
 
     # Schließen-Event X-Close des Fensters aus GUI abfangen und ruft on_close auf.
     # Dadurch wird der Set-Change eingeleitet - dies muss vor dem Start des Fensters passieren!

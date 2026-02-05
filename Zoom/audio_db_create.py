@@ -1,7 +1,6 @@
 import sqlite3
 
-from Zoom.utils import DB2_PATH
-DB_PATH = DB2_PATH
+from Zoom.utils import DB_PATH
 
 def setup_final_db():
     conn = sqlite3.connect(DB_PATH)
@@ -9,54 +8,97 @@ def setup_final_db():
     cursor = conn.cursor()
 
     try:
-        # 1. AUTHORS
+        # 1. AUTOREN
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS authors (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                main_author_id INTEGER,
-                display_name TEXT NOT NULL,
-                search_name_norm TEXT,
-                name_slug TEXT UNIQUE,
-                main_language TEXT,
-                author_image_path TEXT,
+                firstname TEXT,
+                lastname TEXT,
+                slug TEXT UNIQUE,
+                language TEXT,
+                country TEXT,
+                birth_year INTEGER,
+                birth_place INTEGER,
+                birth_date DATE,
+                image_path TEXT,
                 vita TEXT,
-                stars INTEGER DEFAULT 0,
-                FOREIGN KEY (main_author_id) REFERENCES authors (id) ON DELETE SET NULL
+                is_favorite INTEGER DEFAULT 0,
+                Bücher TEXT,
+                books TEXT,
+                libres TEXT,
+                libros TEXT,
+                libri TEXT
             );
         """)
 
-        # 2. SERIES
+        # 2. BLAU: SERIEN (Series)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS series (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                series_original TEXT,
-                series_name_de TEXT,
-                series_name_en TEXT,
-                normalized_name TEXT,
-                notes TEXT,
-                stars INTEGER DEFAULT 0
+                name TEXT,              -- Master-Name
+                name_de TEXT, name_en TEXT, name_fr TEXT, name_it TEXT, name_es TEXT,
+                slug TEXT UNIQUE,
+                link TEXT,              -- URL zu Wiki/Fanpage
+                notes TEXT
             );
         """)
 
-        # 3. WORKS
+        # 3. GRÜN: WERKE (Works)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS works (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 series_id INTEGER,
-                series_number REAL,
-                original_title TEXT,
-                master_title_de TEXT,
-                master_title_en TEXT,
-                normalized_title TEXT,
-                description_global TEXT,
-                notes TEXT,
+                series_index REAL,   -- z.B. 1.5
+                title TEXT,             -- Master-Titel
+                title_de TEXT, title_en TEXT, title_fr TEXT, title_it TEXT, title_es TEXT,
+                slug TEXT,
                 genre TEXT,
                 regions TEXT,
-                topics TEXT,
+                keywords TEXT,
+                description TEXT,       -- Master-Klappentext
+                rating INTEGER,
                 stars INTEGER,
-                rating_google REAL,
-                rating_audible REAL,
+                notes TEXT,
                 FOREIGN KEY (series_id) REFERENCES series (id) ON DELETE SET NULL
+            );
+        """)
+
+        # 4. GELB: BÜCHER (Books - Die physischen Dateien)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS books (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                work_id INTEGER,          -- Link zum grünen Atom (Work)
+
+                -- Dateisystem-Daten (Der Anker)
+                path TEXT UNIQUE,
+                ext TEXT,
+
+                -- Redundante Rohdaten (Direkt aus dem Filename beim Scan)
+                title TEXT,               -- Buchspezifischer Titel
+                series_name TEXT,         -- Roh-String der Serie
+                series_number TEXT,       -- Roh-String der Nummer
+                stars INTEGER,            -- sollte für Work gegeben werden
+                rating_ol REAL,           -- sollte in Work konsolidiert werden
+                rating_ol_count INTEGER,  -- sollte in Work konsolidiert werden
+                rating_g REAL,            -- sollte in Work konsolidiert werden
+                rating_g_count INTEGER,   -- sollte in Work konsolidiert werden
+                is_complete INTEGER DEFAULT 0,
+                is_manuel_description INTEGER DEFAULT 0,
+                scanner_version TEXT DEFAULT '1.4.1',
+
+                -- Metadaten & Status
+                isbn TEXT,
+                language TEXT,
+                image_path TEXT,
+                year TEXT,                -- Jahr aus dem Filename spezfisch für die Edition und Sprache
+                is_read INTEGER DEFAULT 0,
+
+                -- Zusätzliche Infos
+                notes TEXT,                -- genutzt für Probleme beim Scannen
+                description TEXT,          -- genutzt für sprachspezifische Beschreibung
+
+                -- Constraints am Ende
+                FOREIGN KEY (work_id) REFERENCES works (id) ON DELETE SET NULL   
             );
         """)
 
@@ -64,6 +106,7 @@ def setup_final_db():
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS audios (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                work_id INTEGER,          -- Link zum grünen Atom (Work)
                 title TEXT,
                 language TEXT,
                 path TEXT UNIQUE,
@@ -75,43 +118,10 @@ def setup_final_db():
                 description TEXT
             );
         """)
-        # 5. EBOOKS (Physische Files)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS books (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                title TEXT,
-                language TEXT,
-                path TEXT UNIQUE,
-                year INTEGER,
-                isbn TEXT,
-                description TEXT
-            );
-        """)
 
-        # 6. LINK-TABELLEN (Mit Lösch-Automatik für die Links)
-        # Wenn ein Werk oder eine Datei gelöscht wird, verschwindet nur die Verknüpfung
+        # 5. VERKNÜPFUNG: WERK <-> AUTOR
         cursor.execute("""
-            CREATE TABLE IF NOT EXISTS work_to_audio (
-                work_id INTEGER,
-                audio_id INTEGER,
-                PRIMARY KEY (work_id, audio_id),
-                FOREIGN KEY (work_id) REFERENCES works (id) ON DELETE CASCADE,
-                FOREIGN KEY (audio_id) REFERENCES audios (id) ON DELETE CASCADE
-            );
-        """)
-
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS work_to_book (
-                work_id INTEGER,
-                book_id INTEGER,
-                PRIMARY KEY (work_id, book_id),
-                FOREIGN KEY (work_id) REFERENCES works (id) ON DELETE CASCADE,
-                FOREIGN KEY (book_id) REFERENCES books (id) ON DELETE CASCADE
-            );
-        """)
-
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS work_author (
+            CREATE TABLE IF NOT EXISTS work_to_author (
                 work_id INTEGER,
                 author_id INTEGER,
                 PRIMARY KEY (work_id, author_id),
@@ -119,6 +129,7 @@ def setup_final_db():
                 FOREIGN KEY (author_id) REFERENCES authors (id) ON DELETE CASCADE
             );
         """)
+
 
         # Indizes für schnelle Suche anlegen
         cursor.execute("CREATE INDEX idx_series_norm ON series(normalized_name)")

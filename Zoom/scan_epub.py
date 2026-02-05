@@ -9,14 +9,12 @@ BESCHREIBUNG: Kümmert sich um das Auslesen von epub-Dateien
 import os
 import re
 import tempfile
-import html # Oben zu den Imports
 import zipfile
 import xml.etree.ElementTree as ET
 from typing import Dict, Any
 from tqdm import tqdm
 
 try:
-    from Apps.book_data import BookData
     from Zoom.utils import clean_description, sanitize_path
 
 except ImportError:

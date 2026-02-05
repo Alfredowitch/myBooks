@@ -102,7 +102,7 @@ class BookCleaner:
 
         for root, dirs, files in os.walk(base_path):
             # os.walk liefert (rrot, dirs, files zurück) zurück.
-            # root =akt. Dir, dirs = Liste der Unterordner, files = Liste der Files in root
+            # win =akt. Dir, dirs = Liste der Unterordner, files = Liste der Files in win
             book_files = [f for f in files if f.lower().endswith(('.epub', '.pdf', '.mobi'))]
             if not book_files: continue
             norm_root = os.path.abspath(os.path.normpath(root))

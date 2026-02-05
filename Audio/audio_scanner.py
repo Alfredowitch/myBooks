@@ -1,68 +1,92 @@
+import sqlite3
 import os
-from Gemini.file_utils import AUDIO_BASE, DB2_PATH, sanitize_path
-from Zoom.authors import AuthorManager
+import re
+from pathlib import Path
+from Zoom.utils import AUDIO_BASE, DB_PATH, slugify
 
+# Nutze deine bestehenden Atome
+from Audio.book_data import BookData
 
-class AudiobookScanner:
-    def __init__(self, language_suffix="De"):
-        # M:/Hörbuch-De
-        self.root_path = os.path.join(AUDIO_BASE, f"Hörbuch-{language_suffix}")
-        self.manager = AuthorManager(DB2_PATH)
-        self.ignore_list = ["_byRegion", "000-049", "050-099", "_Favoriten"]
+def scan_audiobooks_to_db():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
 
-    def scan_all(self):
-        if not os.path.exists(self.root_path):
-            print(f"Pfad nicht gefunden: {self.root_path}")
-            return
+    # 0. Sicherstellen, dass die Tabelle existiert
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS audios (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            work_id INTEGER,
+            title TEXT,
+            language TEXT,
+            path TEXT UNIQUE,
+            cover_path TEXT,
+            length_hours REAL,
+            size_gb REAL,
+            year INTEGER,
+            speaker TEXT,
+            description TEXT
+        );
+    """)
 
-        for author_folder in os.listdir(self.root_path):
-            if author_folder in self.ignore_list or author_folder.startswith("."):
-                continue
+    audio_root = Path(AUDIO_BASE) / "Hörbuch-De"
+    extensions = {'.mp3', '.m4b', '.m4a'}
 
-            author_path = os.path.join(self.root_path, author_folder)
-            if not os.path.isdir(author_path):
-                continue
+    for root, dirs, files in os.walk(audio_root):
+        audio_files = [f for f in files if Path(f).suffix.lower() in extensions]
+        if not audio_files:
+            continue
 
-            # 1. Autor zuordnen (Nutzt bereits NFC-Normalisierung im Manager)
-            author = self.manager.get_author_by_name(author_folder)
+        path_obj = Path(root)
+        folder_name = path_obj.name
 
-            if not author:
-                # Hier könnten wir später entscheiden: Autor automatisch anlegen?
-                print(f"Skipping: {author_folder} (Nicht in DB)")
-                continue
+        # Pfad-Analyse
+        parts = path_obj.relative_to(audio_root).parts
+        if len(parts) < 2: continue
 
-            # 2. Unterordner (Hörbücher) scannen
-            for book_folder in os.listdir(author_path):
-                book_path = os.path.join(author_path, book_folder)
-                if not os.path.isdir(book_path):
-                    continue
+        author_name = parts[0]
+        serie_name = parts[1] if len(parts) == 3 and parts[1].lower() != "romane" else None
+        search_title = clean_audio_title(folder_name)
 
-                self.process_audiobook_folder(author, book_folder, book_path)
+        # 1. Werk finden oder anlegen
+        cursor.execute("SELECT id FROM works WHERE title LIKE ?", (f"%{search_title}%",))
+        work_res = cursor.fetchone()
 
-    def process_audiobook_folder(self, author, folder_name, full_path):
-        # Pfad für DB normalisieren (NFC + /)
-        db_path = sanitize_path(full_path)
+        if work_res:
+            work_id = work_res[0]
+        else:
+            new_work = WorkTData(title=search_title)
+            temp_mgr = BookData(work=new_work)
 
-        # Titel-Reinigung (Autor-Name vorne entfernen)
-        title = folder_name.replace(author.display_name, "").strip()
-        title = title.lstrip(" -–—")  # Entfernt versch. Bindestriche
+            if " " in author_name:
+                fn, ln = author_name.rsplit(" ", 1)
+                temp_mgr.book.authors = [(fn, ln)]
+            else:
+                temp_mgr.book.authors = [("", author_name)]
 
-        print(f"Found: {author.display_name} -> {title}")
+            if serie_name:
+                mapped_series = SERIES_MAPPING.get(serie_name, serie_name)
+                cursor.execute("SELECT id FROM series WHERE name=? OR name_de=?", (mapped_series, mapped_series))
+                s_res = cursor.fetchone()
+                if s_res:
+                    temp_mgr.work.series_id = s_res[0]
 
-        # Hier suchen wir nach dem Cover (Größte Bilddatei)
-        cover_file = self.find_largest_image(full_path)
-        cover_db_path = sanitize_path(cover_file) if cover_file else None
+            work_id = temp_mgr._find_or_create_work(cursor)
+            temp_mgr.reset_authors(temp_mgr.book.authors, work_id, cursor)
 
-        # TODO: Hier rufen wir jetzt die Logik auf:
-        # 1. Check/Create Work (basiert auf title & author_id)
-        # 2. Create Audio Entry (verknüpft mit path und work_id)
+        # 2. Cover & Metadaten
+        cover_file = next((f for f in files if Path(f).suffix.lower() in {'.jpg', '.png', '.jpeg'}), "")
+        cover_path = str(path_obj / cover_file) if cover_file else ""
 
-    def find_largest_image(self, folder_path):
-        images = [f for f in os.listdir(folder_path)
-                  if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
-        if not images:
-            return None
+        # Größe berechnen (Optional, aber nützlich)
+        total_size = sum(os.path.getsize(os.path.join(root, f)) for f in files)
+        size_gb = round(total_size / (1024 ** 3), 2)
 
-        # Den Pfad mit der größten Dateigröße finden
-        full_images = [os.path.join(folder_path, img) for img in images]
-        return max(full_images, key=os.path.getsize)
+        # 3. Speichern
+        cursor.execute("""
+            INSERT OR IGNORE INTO audios (work_id, title, path, cover_path, size_gb, speaker)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (work_id, folder_name, str(path_obj), cover_path, size_gb, ""))
+
+    conn.commit()
+    conn.close()
+    print("Audio-Scan erfolgreich abgeschlossen.")

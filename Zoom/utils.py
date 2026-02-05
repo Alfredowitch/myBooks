@@ -19,13 +19,12 @@ def get_paths():
         return {
             'db_root': r"C:\DB",
             'ebook_src': "D:/Bücher",
-            'audio_src': r"C:\DB"
+            'audio_src': r"M:/"
         }
 
 
 PATHS = get_paths()
 DB_PATH = os.path.join(PATHS['db_root'], "books.db")
-DB2_PATH = os.path.join(PATHS['db_root'], "audiobooks.db")
 
 EBOOK_BASE = PATHS['ebook_src']
 AUDIO_BASE = PATHS['audio_src']

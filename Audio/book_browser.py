@@ -100,13 +100,13 @@ class BookBrowser:
 
         if 'b_series_name' in self.view.widgets:
             self.view.widgets['b_series_name'].bind("<FocusOut>", lambda e: self.re_evaluate_fingerprint())
-        if 'b_series_number' in self.view.widgets:
-            self.view.widgets['b_series_number'].bind("<FocusOut>", lambda e: self.re_evaluate_fingerprint())
+        if 'b_series_index' in self.view.widgets:
+            self.view.widgets['b_series_index'].bind("<FocusOut>", lambda e: self.re_evaluate_fingerprint())
 
     def update_ui_lists(self):
         if not self.current_book:
             return
-        author_list = self.current_book.authors
+        author_list = self.current_book.book.authors
         # 1. Serien-Liste aktualisieren (via Model)
         self.current_book.all_available_series = self.current_book.get_prioritized_series(author_list)
 
@@ -312,52 +312,66 @@ class BookBrowser:
             self.current_book = self.model.get_book_by_path(item['PATH'])
 
         if self.current_book:
-            # 1. Info für ComboBox-Listen vorbereiten
-            # Wir laden die Listen basierend auf den Autoren des gerade geladenen Buchs
-            author_list = getattr(self.current_book, 'authors', [])
-            # Falls die DB keine Autoren liefert (AUTHORS: []), extrahieren wir aus dem Pfad
-            if not author_list:
-                # Extrahiert "Rowling" aus "J.K. Rowling — Harry Potter..."
-                filename = os.path.basename(getattr(self.current_book.book, 'path', ""))
-                if " — " in filename:
-                    raw_author = filename.split(" — ")[0]
-                    # Wir nehmen den letzten Teil als Nachnamen für die Suche
-                    ln = raw_author.split(" ")[-1]
-                    author_list = [('', ln)]
-                    print(f"🔍 Backup-Suche: Nutze Nachname '{ln}' aus Dateiname.")
-                # Bandnummer (Series Index) aus dem Pfad extrahieren (z.B. "07")
+            author_list = getattr(self.current_book.book, 'authors', [])
+            path_str = getattr(self.current_book.book, 'path', "")
+            filename = os.path.basename(path_str)
 
-                path_str = getattr(self.current_book.book, 'path', "")
+            # --- VERFEINERTE SERIEN- UND INDEX-ERKENNUNG (V1.5.1) ---
+            # Nutze die Logik aus scan_file: Erster Bindestrich nach Autor
+            # Wir nehmen an, dass extract_info_from_filename bereits im Model genutzt wurde.
+            # Falls wir hier manuell patchen müssen:
+            s_idx = 0.0
+
+            # Wir prüfen, ob der Manager bereits einen Index hat (aus der DB)
+            if hasattr(self.current_book.book, 'series_index') and self.current_book.book.series_index:
+                s_idx = float(self.current_book.book.series_index)
+            else:
+                # Fallback: Extraktion aus dem Filename falls DB leer
+                match = re.search(r'(?:[\s#]|Nr\.|No\.)*(\d+(?:[.,]\d+)?)\s?[-–—]', filename)
+                if match:
+                    try:
+                        s_idx = float(match.group(1).replace(',', '.'))
+                    except ValueError:
+                        s_idx = 0.0
+
+            # SYNC: Den Index in BEIDE Atome schreiben
+            self.current_book.book.series_index = s_idx
+            if self.current_book.work:
+                # Hier lag der Fehler: Das Werk muss den Index des Buches kennen
+                self.current_book.work.series_index = s_idx
+
+            # Backup: Falls die obige Logik nicht griff, alter Regex-Versuch
+            if s_idx is None:
                 match = re.search(r' (\d+)-', path_str)
                 s_idx = int(match.group(1)) if match else None
                 if s_idx:
-                    self.current_book.book.series_index = s_idx  # Dem Atom zuweisen!
+                    self.current_book.book.series_index = s_idx
+
+            if not author_list:
+                # Extrahiert Autor aus "Autor — Titel" Struktur falls vorhanden
+                if " — " in filename:
+                    raw_author = filename.split(" — ")[0]
+                    ln = raw_author.split(" ")[-1]
+                    author_list = [('', ln)]
+                    print(f"🔍 Backup-Suche: Nutze Nachname '{ln}' aus Dateiname.")
 
             self.current_book.all_available_series = self.current_book.get_prioritized_series(author_list)
-            # Hier nutzen wir jetzt den neuen Filter (Autoren + Bandnummer)
-            # Das liefert entweder genau das eine richtige Werk oder alle 50 als Backup
             self.current_book.all_available_works = self.current_book.get_works_by_authors(author_list,
                                                                                            series_index=s_idx)
+
             # 2. Pfade säubern
-            self.current_file_path = sanitize_path(getattr(self.current_book.book, 'path', ""))
-            # Falls es schon einen extrahierten Pfad in der DB gibt, nutzen wir ihn,
-            # ansonsten muss die View aus der Quelldatei extrahieren.
+            self.current_file_path = sanitize_path(path_str)
             c_path = sanitize_path(getattr(self.current_book.book, 'cover_path', None))
 
-            # 3. View füllen & On-the-fly Extraktion triggern
+            # 3. View füllen & Anzeige
             self.view.fill_widgets(self.current_book)
-
-            # Hier passiert die Magie: View extrahiert aus self.current_file_path
             self.view.display_cover(c_path, self.current_file_path)
 
-            # 4. Bild-Referenz "festkrallen"
-            # Wir holen das on-the-fly erzeugte Bild aus der View
+            # 4. Bild-Referenz fixieren
             if hasattr(self.view, 'tk_img') and self.view.tk_img:
                 self._img_keep_alive = self.view.tk_img
-                # Zwinge das Label zur Anzeige des neuen Objekts
                 if hasattr(self.view, 'cover_label'):
                     self.view.cover_label.config(image=self._img_keep_alive)
-                    # Interner Python-Trick: Referenz direkt am Widget speichern
                     self.view.cover_label.image = self._img_keep_alive
             self._update_navigation_status()
 
@@ -397,23 +411,53 @@ class BookBrowser:
         print("--------------------------------------\n")
         # --- DEBUG ENDE ---
 
+        # 2. Expliziter Abgleich: Buch -> Werk
+        # Wenn das Buch einen Index hat, das Werk aber nicht (oder 0), überschreiben wir es.
+        if self.current_book.book.series_index > 0:
+            self.current_book.work.series_index = self.current_book.book.series_index
 
-        # 2. Speichern via Model
+        # 3. Konflikt-Prüfung (Jack-Reacher-Falle verhindern)
+        conflicts = mgr.get_work_conflicts()
+        if conflicts:
+            msg = f"⚠️ ACHTUNG: Werk-Konflikt erkannt!\n\n"
+            msg += f"Dieses Werk (ID: {mgr.book.work_id}) enthält bereits Bücher von anderen Autoren:\n"
+            for b in conflicts[:5]:  # Max 5 anzeigen
+                msg += f"• {b['author']} - {b['title']}\n"
+
+            msg += "\nMöchtest du ein NEUES WERK anlegen und dieses Buch dorthin migrieren?"
+
+            if messagebox.askyesno("Werk-Konflikt", msg):
+                # AUTOMATISCHE TRENNUNG & MIGRATION
+                print(f"🚀 Erstelle neues Werk für {mgr.book.title}...")
+                # Wir setzen die ID auf 0, damit model.save_book ein neues Werk erstellt
+                # Die Metadaten (Genre, Description etc.) sind bereits im mgr.work Objekt
+                mgr.book.work_id = None
+                mgr.work.id = 0
+                # model.save_book wird nun ein neues Werk mit den aktuellen Autoren anlegen
+
+        # 4 Speichern via Model
+        # a) Werk anlegen/finden
+        # b) ALLE Autoren-Verknüpfungen in work_to_author neu setzen (Punkt 2 deiner Anforderung)
+        success, final_path = self.model.save_book(self.current_book, self.current_file_path)
         print(f"DEBUG BROWSER: self.current_file_path = '{self.current_file_path}'")
         print(f"DEBUG BROWSER: self.current_book.book.path = '{self.current_book.book.path}'")
-        success, final_path = self.model.save_book(self.current_book, self.current_file_path)
+
         if success:
-            # 3. Den Pfad im Speicher aktualisieren, falls er sich beim Verschieben geändert hat
-            if final_path:
+            # 4. Den Pfad im Speicher aktualisieren, falls er sich beim Verschieben geändert hat
+            if final_path and final_path != self.current_file_path:
                 self.current_file_path = sanitize_path(final_path)
-                self.current_book.path = self.current_file_path
+                self.current_book.book.path = self.current_file_path
                 # WICHTIG: Auch den Pfad im Navigation-Item aktualisieren!
                 if 'PATH' in self.navigation_list[self.current_index]:
                     self.navigation_list[self.current_index]['PATH'] = self.current_file_path
-            # 4. den Status aktualisieren
+            # 5. Den Status im Objekt setzen
             self.current_book.is_in_db = True
+            # 6. DB-Refresh erzwingen:
+            # Wir laden das Buch komplett neu aus der DB, um zu validieren,
+            if hasattr(self.current_book.book, 'id') and self.current_book.book.id:
+                self.navigation_list[self.current_index]['ID'] = self.current_book.book.id
             self.current_book.capture_db_state()  # Der Arbeitsstand ist jetzt der neue DB-Stand
-            # 5. Das UI-Element in der Navigation aktualisieren
+            # 7. Das UI-Element in der Navigation aktualisieren
             self.display_navigation_item(self.current_index)  # Zeichnet die Zeile neu (jetzt GRÜN)
             print(f"✅ Erfolgreich gespeichert: {os.path.basename(self.current_file_path)}")
         else:
@@ -424,10 +468,36 @@ class BookBrowser:
     # LÖSCHEN eines BUCHES
     # ----------------------------------------------------------------------
     def delete_current_book(self):
-        if self.current_book and self.model.delete_book(self.current_book):
+        if not self.current_book:
+            return
+        # Sicherheitsabfrage (Empfohlen)
+        # Wir merken uns das Fenster, um den Fokus zurückzuholen
+        if not messagebox.askyesno("Löschen", "Buch wirklich löschen?", parent=self.win):
+            return
+        try:
+            # Dein neuer Aufruf
+            self.current_book.delete_book()
             messagebox.showinfo("Löschen", "Buch wurde entfernt.")
-            # Nach dem Löschen zum nächsten springen oder Liste leeren
+            # WICHTIG: Das gelöschte Element aus der Navigations-Liste entfernen
+            if 0 <= self.current_index < len(self.navigation_list):
+                self.navigation_list.pop(self.current_index)
+            # Fokus explizit zurück auf das BookBrowser-Fenster
+            self.win.focus_force()
+            self.win.lift()
+            # Prüfen, ob noch Bücher übrig sind
+            if not self.navigation_list:
+                messagebox.showinfo("Info", "Keine weiteren Bücher in der Liste.", parent=self.win)
+                self.win.destroy()  # Schließt das Toplevel-Fenster des Browsers
+                return
+            # Falls wir das letzte Buch gelöscht haben, Index eins zurück
+            if self.current_index >= len(self.navigation_list):
+                self.current_index = len(self.navigation_list) - 1
+            # Jetzt das NÄCHSTE Buch anzeigen
             self.display_navigation_item(self.current_index)
+            self.win.focus_force()  # Fokus zurückholen
+
+        except Exception as e:
+            messagebox.showerror("Fehler", f"Löschen fehlgeschlagen: {e}")
 
 
 if __name__ == "__main__":

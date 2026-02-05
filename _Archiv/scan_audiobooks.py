@@ -48,7 +48,7 @@ def parse_folder_structure(root, author_folder, title_folder):
         elif parts[0] == author_folder:
             title = parts[1]
 
-    # Wenn es zwischen dem Autoren_path und dem Titel_path = root ein weiteres Verzeichnis gibt
+    # Wenn es zwischen dem Autoren_path und dem Titel_path = win ein weiteres Verzeichnis gibt
     # dann könnte das die Serie oder Season sein.
     rel_path = os.path.relpath(root, author_folder)
     if "/" in rel_path or "\\" in rel_path:
@@ -147,13 +147,13 @@ def process_audiobooks():
             if not os.path.isdir(author_path):
                 continue
             # os.walk() läuft rekursiv durch den author_path-Ordner und liefert:
-            # root: aktuelles Verzeichnis
+            # win: aktuelles Verzeichnis
             # dirs: Unterordner
-            # files: alle Dateien im aktuellen root (= Author_folder, dann Titel_folder)
+            # files: alle Dateien im aktuellen win (= Author_folder, dann Titel_folder)
             for root, dirs, files in os.walk(author_path):
-                #print(f"Root: {root}, Dir: {len(dirs)}, File: {len(files)}")
+                #print(f"Root: {win}, Dir: {len(dirs)}, File: {len(files)}")
                 """
-                z.B. root: M:\Hörbuch-De\.sorted
+                z.B. win: M:\Hörbuch-De\.sorted
                 z.B: dirs: ['Barcelona', 'Baskenland', 'Bayern']
                 z.B: files: File: ['RegionalKrimis.JPG']
                 """
@@ -163,7 +163,7 @@ def process_audiobooks():
 
                 if any(f.endswith(".mp3") for f in files):
                     title_folder = os.path.basename(root)
-                    #print(f"Root: {root}, A-Folder: {author_folder}, T-Folder: {title_folder}")
+                    #print(f"Root: {win}, A-Folder: {author_folder}, T-Folder: {title_folder}")
                     author, series, title, year, episode = parse_folder_structure(root, author_path, title_folder)
                     length = get_audio_length(root)
                     cover_path = finde_coverbild(root)

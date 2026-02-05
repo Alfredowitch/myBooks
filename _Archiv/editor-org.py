@@ -49,10 +49,10 @@ def edit_description_and_rating(initial_description, amazon_rating):
 root = tk.Tk()
 root.geometry('900x400')
 
-#frame_top = tk.Frame(root)
+#frame_top = tk.Frame(win)
 #frame_top.pack()
 
-#frame_custom = tk.Frame(root)
+#frame_custom = tk.Frame(win)
 #frame_custom.pack()
 tk.Label(root, text="Titel").pack()
 

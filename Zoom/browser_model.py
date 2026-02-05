@@ -5,11 +5,11 @@ BESCHREIBUNG: Das "Gehirn" des Browsers. Bietet explizite Methoden für
               den Zugriff via ID oder Pfad sowie die Speicherlogik.
 """
 import os
-import tkinter as tk
 from typing import Tuple, Optional, List
 
 try:
     from Audio.book_data import BookData, BookTData, WorkTData, SerieTData
+    from Zoom.scan_file import extract_info_from_filename, derive_metadata_from_path
     from Audio.book_scanner import Scanner
     from Zoom.utils import sanitize_path, DB_PATH, slugify
     from Zoom.work_manager import WorkManager
@@ -30,14 +30,14 @@ class BrowserModel:
     @staticmethod
     def get_book_by_id(book_id: int) -> Optional[BookData]:
         # Kein eigenes SQL mehr!
-        return BookData.load_by_id(book_id)
+        return BookData.load_db_by_id(book_id)
 
     @staticmethod
     def get_book_by_path(path: str) -> BookData:
         clean_path = sanitize_path(path)
 
         # 1. VERSUCH: Datenbank (Der "Grüne" Pfad)
-        book_obj = BookData.load_by_path(clean_path)
+        book_obj = BookData.load_db_by_path(clean_path)
         if book_obj:
             book_obj.capture_db_state()  # Anker für Vergleich werfen
             book_obj.is_in_db = True
@@ -45,8 +45,6 @@ class BrowserModel:
 
         # 2. VERSUCH: Physischer Scan (Der "Blaue" Pfad)
         if os.path.exists(clean_path):
-            # Wir erzeugen den Manager vorab
-            book_obj = BookData()
             # Der Scanner (Alte Welt) liefert das Atom
             scanned_obj = Scanner.scan_single_book(clean_path)
 
@@ -77,7 +75,6 @@ class BrowserModel:
         Vollautomatische Veredelung des Aggregats nach dem Scan.
         Setzt die 9 Punkte der Konsolidierung um.
         """
-        wm = WorkManager()
 
         # Vorbereitung: Sprache des Autors ermitteln
         author_lang = manager.get_author_language() or 'en'  # Nutzt jetzt die konsolidierte Methode
@@ -95,7 +92,8 @@ class BrowserModel:
         if best_serie_id:
             # Nutzt jetzt die neue universelle Methode get_series_details
             manager.serie = manager.get_series_details(best_serie_id)
-
+        if manager.book.series_index:
+            manager.work.series_index = manager.book.series_index
         # Wenn wir ein Werk haben (neu oder gefunden), führen wir die Datenzusammenführung aus:
         # 2. bis 9. DATEN-KONSOLIDIERUNG
         associated_books = manager.get_all_books_for_work(manager.work.id)
@@ -170,7 +168,21 @@ class BrowserModel:
         try:
             actual_old_path = old_path or mgr.book.path
 
-            # 1. PHYSIKALISCHES RENAME (Vor dem DB-Save, damit Pfad in DB stimmt)
+            # 1. Wenn der Serienname gelöscht wurde, kappen wir die Verbindung im Objekt.
+            # mgr.save() kümmert sich um den Rest (Update oder neues Werk).
+            if not mgr.book.series_name or not mgr.book.series_name.strip():
+                mgr.work.series_id = 0
+                mgr.work.series_index = 0.0  # Typsicher
+                mgr.book.series_id = 0
+                mgr.book.series_index = 0.0  # Umbenannt von series_number
+                print(f"DEBUG: Serien-Entkopplung für '{mgr.work.title}' gesetzt.")
+            else:
+                # WICHTIG: Synchronisation Buch -> Werk vor dem DB-Save
+                # Das stellt sicher, dass das Werk den Index des führenden Buchs übernimmt.
+                mgr.work.series_index = float(mgr.book.series_index or 0.0)
+                print(f"DEBUG: Serien-Entkopplung für '{mgr.work.title}' im Objekt gesetzt.")
+
+            # 2. PHYSIKALISCHES RENAME (Vor dem DB-Save, damit Pfad in DB stimmt)
             if actual_old_path and os.path.exists(actual_old_path):
                 new_path = Scanner.build_perfect_filename(mgr)
 
@@ -180,7 +192,7 @@ class BrowserModel:
                     mgr.book.path = new_path
                     print(f"🚚 Rename: {os.path.basename(new_path)}")
 
-            # 2. DB-COMMIT
+            # 3. DB-COMMIT
             # Nutzt die Logik: "Passt der Titel noch zur ID?" direkt im Modul
             success = mgr.save()
 
@@ -195,15 +207,13 @@ class BrowserModel:
             traceback.print_exc()
             return False, str(e)
 
+
 # --------------------------------------------------------------------------
 # TEST-AUFRUF UND INITIALISIERUNG
 # --------------------------------------------------------------------------
 if __name__ == "__main__":
-    from Audio.book_browser import BookBrowser
-    root = tk.Tk()
-    root.withdraw()
-    test_nav = [{'ID': 1}]
-    browser_win = tk.Toplevel(root)
-    app = BookBrowser(browser_win, initial_list=test_nav)
-    browser_win.protocol("WM_DELETE_WINDOW", root.destroy)
-    root.mainloop()
+    # Da alles statisch ist, kannst du direkt testen (Beispiel):
+    print("🚀 BrowserModel geladen. Teste Pfad-Abfrage...")
+    # test_path = "C:/Dein/Test/Pfad.epub"
+    # book = BrowserModel.get_book_by_path(test_path)
+    # print(f"Buch-Titel: {book.book.title}")

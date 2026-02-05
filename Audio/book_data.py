@@ -3,13 +3,16 @@ import sqlite3
 import copy
 import traceback # Für detaillierte Fehlersuche
 from dataclasses import dataclass, asdict, fields, field
-from typing import List, Optional, Tuple, Any, Union
+from typing import List, Optional, Union
 
 from Zoom.utils import DB_PATH, slugify, sanitize_path
 
 
-def force_set(value, debug_name="Unknown") -> set:
+def force_set(value, label: str = None) -> set:
     """Wandelt Eingaben sicher in ein Set von Strings um und splittet Kommas."""
+    if label and not value:
+        print(f"DEBUG: {label} ist leer oder None")
+
     if not value:
         return set()
 
@@ -30,7 +33,7 @@ def force_set(value, debug_name="Unknown") -> set:
 
 @dataclass
 class BookTData:
-    id: int = 0
+    id: Optional[int] = None
     work_id: int = 0
     path: str = ""
     title: str = ""
@@ -42,7 +45,7 @@ class BookTData:
     notes: str = ""
     language: str = ""
     series_name: str = ""
-    series_number: str = ""
+    series_index: float = 0
     is_complete: int = 0
     is_read: int = 0
     scanner_version: str = ""
@@ -138,17 +141,18 @@ class WorkTData:
     keywords: set = field(default_factory=set)
     regions: set = field(default_factory=set)
 
+    @classmethod
+    def from_dict(cls, data: dict):
+        """Erstellt ein Objekt und filtert unbekannte Keys einfach raus."""
+        # Nur Keys behalten, die tatsächlich in der Dataclass definiert sind
+        valid_keys = {f.name for f in fields(cls)}
+        filtered_data = {k: v for k, v in data.items() if k in valid_keys}
+        return cls(**filtered_data)
 
-    # --- DER FIX FÜR DEN FEHLER ---
-    def __init__(self, **kwargs):
-        # Hole alle offiziellen Felder der Dataclass
-        names = {f.name for f in fields(self.__class__)}
-        for k, v in kwargs.items():
-            if k in names:
-                setattr(self, k, v)
-        # Manuelle Post-Init Logik, da __post_init__ bei manuellem __init__ nicht automatisch kommt
-        self.keywords = force_set(getattr(self, 'keywords', set()))
-        self.regions = force_set(getattr(self, 'regions', set()))
+    def __post_init__(self):
+        # Deine force_set Logik
+        self.keywords = force_set(self.keywords)
+        self.regions = force_set(self.regions)
 
     # Das ist der "Türsteher" der Klasse. Bei neuen Daten wird automatisch SET aufgerufen
     def __setattr__(self, name, value):
@@ -174,10 +178,11 @@ class SerieTData:
 # --- DER MANAGER (AGGREGAT) ---
 
 class BookData:
-    def __init__(self, book=None, work=None, serie=None):
-        self.book = book or BookTData()
-        self.work = work or WorkTData()
-        self.serie = serie or SerieTData()
+    def __init__(self, book_obj=None, work_obj=None, serie_obj=None):
+        # Jetzt gibt es keine Namenskollision mehr
+        self.book = book_obj or BookTData()
+        self.work = work_obj or WorkTData()
+        self.serie = serie_obj or SerieTData()
         self.db_snapshot = None
         self.is_in_db = False
         self.all_available_works = []
@@ -187,103 +192,80 @@ class BookData:
     # I. LOAD (Fabrik-Methoden & DB-Abfragen)
     # ----------------------------------------------------------------------
     @classmethod
-    def load_by_id(cls, book_id: int) -> Optional['BookData']:
+    def load_db_by_id(cls, book_id: int) -> Optional['BookData']:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute("SELECT path FROM books WHERE id = ?", (book_id,))
         res = cursor.fetchone()
         conn.close()
-        return cls.load_by_path(res[0]) if res else None
+        return cls.load_db_by_path(res[0]) if res else None
 
     @classmethod
-    def load_by_path(cls, file_path: str) -> Optional['BookData']:
+    def load_db_by_path(cls, file_path: str) -> Optional['BookData']:
         clean_path = sanitize_path(file_path)
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         try:
-            # 1. Buch-Daten laden (SELECT * ist hier sicher, da nur eine Tabelle)
+            # 1. Buch aus DB laden
             res_book = cursor.execute("SELECT * FROM books WHERE path = ?", (clean_path,)).fetchone()
             if not res_book:
                 conn.close()
                 return None
 
             row_b = dict(res_book)
+            book_atom = BookTData(**{f.name: row_b[f.name] for f in fields(BookTData) if f.name in row_b})
 
-            # Erzeugt BookTData; Keywords/Regions werden durch __post_init__ automatisch zu Sets
-            book_params = {f.name: row_b[f.name] for f in fields(BookTData) if f.name in row_b}
-            book_atom = BookTData(**book_params)
-            # --- 🕵️ KRITISCHER DB-LOG ---
-            print(f"\n--- 🗄️ DATABASE RAW SNAPSHOT (ID: {clean_path}) ---")
-            print(f"Book_ID: {book_atom.id}")
-            print(f"Work-Ref: {book_atom.work_id}")
-            print(f"TITEL: {book_atom.title}")
-            print(f"YEAR: {book_atom.year} (Typ: {type(book_atom.year).__name__})")
-            print(
-                f"SERIES_INDEX: {getattr(book_atom, 'series_index', 'N/A')} (Typ: {type(getattr(book_atom, 'series_index', None)).__name__})")
-            print(f"KEYWORDS: {book_atom.keywords} (Typ: {type(book_atom.keywords).__name__})")
+            # 2. DIE WAHRHEIT (Lokaler Import verhindert Zirkelbezug)
+            from Zoom.scan_file import extract_info_from_filename
+            info = extract_info_from_filename(clean_path)
 
-            # Check auf Int-Leichen in den Keywords
-            if isinstance(book_atom.keywords, set):
-                int_keys = [k for k in book_atom.keywords if not isinstance(k, str)]
-                if int_keys:
-                    print(f"⚠️ GEFUNDEN: Integer in Keywords! -> {int_keys}")
+            # Autoren-Identität NUR aus dem Pfad (für saubere Heilung)
+            book_atom.authors = []
+            if info and info.get('authors'):
+                # In scan_file werden sie bereits als (Vorname, Nachname) geliefert
+                book_atom.authors = info['authors']
 
-            print(f"AUTHORS: {book_atom.authors}")
-            print("----------------------------------------------\n")
-
-            # 2. Werk-Daten laden (basierend auf der work_id des Buches)
+            # 3. Werk laden (Zustand der DB)
             work_atom = WorkTData()
             if book_atom.work_id:
                 res_work = cursor.execute("SELECT * FROM works WHERE id = ?", (book_atom.work_id,)).fetchone()
                 if res_work:
-                    row_w = dict(res_work)
-                    work_params = {f.name: row_w[f.name] for f in fields(WorkTData) if f.name in row_w}
-                    work_atom = WorkTData(**work_params)
-                # NEU: Anzahl der verknüpften Bücher ermitteln
-                # Wir nutzen deine Funktion
-                sibling_books = cls().get_all_books_for_work(work_atom.id)
-                work_atom.book_count = len(sibling_books)
+                    work_atom = WorkTData(
+                        **{f.name: r[f.name] for r in [dict(res_work)] for f in fields(WorkTData) if f.name in r})
+                    # Book Count direkt holen
+                    cnt = cursor.execute("SELECT COUNT(*) FROM books WHERE work_id=?", (work_atom.id,)).fetchone()
+                    work_atom.book_count = cnt[0] if cnt else 0
 
-            # 3. Serien-Daten laden (basierend auf der series_id des Werks)
+            # 4. Serie laden
             serie_atom = SerieTData()
             if work_atom.series_id:
                 res_serie = cursor.execute("SELECT * FROM series WHERE id = ?", (work_atom.series_id,)).fetchone()
                 if res_serie:
-                    row_s = dict(res_serie)
-                    serie_params = {f.name: row_s[f.name] for f in fields(SerieTData) if f.name in row_s}
-                    serie_atom = SerieTData(**serie_params)
+                    serie_atom = SerieTData(
+                        **{f.name: r[f.name] for r in [dict(res_serie)] for f in fields(SerieTData) if f.name in r})
 
-            # 4. Autoren laden (Verknüpfung via Work)
-            authors_list = []
-            if work_atom.id:
-                sql_auth = """SELECT a.firstname, a.lastname FROM authors a
-                                  JOIN work_to_author wa ON a.id = wa.author_id 
-                                  WHERE wa.work_id = ?"""
-                authors_list = [(r[0], r[1]) for r in cursor.execute(sql_auth, (work_atom.id,)).fetchall()]
+            # --- 🕵️ DB-LOG ---
+            print(f"\n--- 🗄️ DATABASE RAW SNAPSHOT ---")
+            print(f"Path: {clean_path}")
+            print(f"Work-Ref (DB): {book_atom.work_id} | Authors (File): {book_atom.authors}")
+            print("--------------------------------\n")
 
-            # Autoren dem Buch-Atom zuweisen
-            book_atom.authors = authors_list
-
-            # Manager instanziieren und Zustand für Dirty-Check einfrieren
-            mgr = cls(book=book_atom, work=work_atom, serie=serie_atom)
+            mgr = cls(book_obj=book_atom, work_obj=work_atom, serie_obj=serie_atom)
             mgr.is_in_db = True
 
-            # Dropdown-Listen für die UI befüllen (Autor-priorisiert)
-            mgr.all_available_series = mgr.get_prioritized_series(authors_list)
-            mgr.all_available_works = mgr.get_works_by_authors(authors_list)
+            # Priorisierte Listen basierend auf den File-Autoren befüllen
+            mgr.all_available_series = mgr.get_prioritized_series(book_atom.authors)
+            mgr.all_available_works = mgr.get_works_by_authors(book_atom.authors)
 
             conn.close()
             mgr.capture_db_state()
             return mgr
+
         except Exception as e:
-            conn.close()
-            print("\n" + "!" * 60)
-            print(f"❌ DEBUG FEHLER in load_by_path:")
-            print(f"Pfad: {file_path}")
-            print(traceback.format_exc())  # Das zeigt uns die Zeilennummer!
-            print("!" * 60 + "\n")
-            raise e  # Fehler weiterreichen, damit das Popup trotzdem kommt
+            if conn: conn.close()
+            print(f"❌ FEHLER in load_db_by_path: {traceback.format_exc()}")
+            raise e
 
     @staticmethod
     def search_paths(author_q: str, title_q: str) -> List[str]:
@@ -323,15 +305,16 @@ class BookData:
         vals = [v for v in [b.rating_ol, b.rating_g] if v > 0]
         return round(sum(vals) / len(vals), 2) if vals else 0.0
 
-
-    def get_description_by_lang(self, associated_books: List[BookTData], lang: str) -> Optional[str]:
+    @staticmethod
+    def get_description_by_lang(associated_books: List[BookTData], lang: str) -> Optional[str]:
         """Sucht in der Liste vorhandener Bücher nach einer Beschreibung in der Zielsprache."""
         for b in associated_books:
             if b.language == lang and b.description:
                 return b.description
         return None
 
-    def get_all_books_for_work(self, work_id: int) -> List[BookTData]:
+    @staticmethod
+    def get_all_books_for_work(work_id: int) -> List[BookTData]:
         """Holt alle Bücher, die bereits an diesem Werk hängen, für den Durchschnitt/Merge."""
         if not work_id: return []
         conn = sqlite3.connect(DB_PATH)
@@ -346,38 +329,36 @@ class BookData:
     # --- WORK ---
     @staticmethod
     def find_work_by_series_fingerprint(book_data: BookData) -> Optional[int]:
-        if not book_data.book.authors or not book_data.book.series_number:
+        # Änderung: Nutze series_index statt series_number
+        if not book_data.book.authors or not book_data.book.series_index:
             return None
+
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         try:
             fn, ln = book_data.book.authors[0]
             author_slug = slugify(f"{fn} {ln}")
-            cursor.execute("SELECT language FROM authors WHERE slug = ?", (author_slug,))
-            res = cursor.fetchone()
-            author_lang = res[0] if res and res[0] else 'en'
 
+            # SQL angepasst auf series_index
             sql = """
-                SELECT b.work_id 
-                FROM books b
-                JOIN work_to_author wa ON b.work_id = wa.work_id
-                JOIN authors a ON wa.author_id = a.id
-                WHERE a.slug = ? 
-                  AND b.series_number = ? 
-                  AND b.language = ?
-                  AND b.work_id IS NOT NULL
-                LIMIT 1
-            """
-            cursor.execute(sql, (author_slug, book_data.book.series_number, author_lang))
+                    SELECT b.work_id 
+                    FROM books b
+                    JOIN work_to_author wa ON b.work_id = wa.work_id
+                    JOIN authors a ON wa.author_id = a.id
+                    WHERE a.slug = ? 
+                      AND b.series_index = ? 
+                      AND b.language = ?
+                      AND b.work_id IS NOT NULL
+                    LIMIT 1
+                """
+            cursor.execute(sql, (author_slug, book_data.book.series_index, book_data.get_author_language()))
             res = cursor.fetchone()
             return res[0] if res else None
-        except Exception as e:
-            print(f"⚠️ Fehler im Model bei Fingerprint-Match: {e}")
-            return None
         finally:
             conn.close()
 
-    def find_best_work_match(self, title: str, lang: str) -> Optional[int]:
+    @staticmethod
+    def find_best_work_match(title: str, lang: str) -> Optional[int]:
         if not title: return None
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
@@ -391,7 +372,7 @@ class BookData:
         return res[0] if res else None
 
     def load_work_into_manager(self, work_id: int):
-        conn = sqlite3.connect(DB_PATH);
+        conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
         row = conn.execute("SELECT * FROM works WHERE id = ?", (work_id,)).fetchone()
         if row:
@@ -414,7 +395,8 @@ class BookData:
         if not self.work.title:
             self.work.title = self.book.title
 
-    def get_work_details_by_title(self, title: str, authors: list) -> WorkTData:
+    @staticmethod
+    def get_work_details_by_title(title: str, authors: list) -> WorkTData:
         if not title: return WorkTData()
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
@@ -474,8 +456,9 @@ class BookData:
         return res
 
     # --- SERIES ---
-    def get_series_details(self, identifier: Union[int, str]) -> SerieTData:
-        conn = sqlite3.connect(DB_PATH);
+    @staticmethod
+    def get_series_details(identifier: Union[int, str]) -> SerieTData:
+        conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
         if isinstance(identifier, int):
             row = conn.execute("SELECT * FROM series WHERE id = ?", (identifier,)).fetchone()
@@ -485,7 +468,8 @@ class BookData:
         conn.close()
         return SerieTData(**dict(row)) if row else SerieTData(name=str(identifier))
 
-    def find_best_serie_match(self, name: str, lang: Optional[str] = None) -> Optional[int]:
+    @staticmethod
+    def find_best_serie_match(name: str, lang: Optional[str] = None) -> Optional[int]:
         """
         Sucht eine Serie nach Namen (auch übersetzt) und gibt die ID zurück.
         Berücksichtigt optional eine spezifische Sprache.
@@ -540,7 +524,8 @@ class BookData:
         finally:
             conn.close()
 
-    def get_series_id_by_name(self, name: str) -> Optional[int]:
+    @staticmethod
+    def get_series_id_by_name(name: str) -> Optional[int]:
         if not name:
             return None
 
@@ -585,7 +570,8 @@ class BookData:
             if not self.serie.name_en:
                 self.serie.name_en = self.book.series_name
 
-    def get_series_details_by_name(self, name: str) -> SerieTData:
+    @staticmethod
+    def get_series_details_by_name(name: str) -> SerieTData:
         if not name: return SerieTData()
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
@@ -660,113 +646,170 @@ class BookData:
             'authors': copy.deepcopy(self.book.authors)
         }
 
+    # ----------------------------------------------------------------------
+    # IV SPEICHERN
+    # ----------------------------------------------------------------------
+    def _find_or_create_work(self, cursor) -> int:
+        if not self.work.title:
+            return 0
 
-    # ----------------------------------------------------------------------
-    # IV. SAVE
-    # ----------------------------------------------------------------------
+        # 1. Ziel-Identität vorbereiten
+        target_authors = self.book.authors if self.book.authors else []
+        target_count = len(target_authors)
+        target_names_sorted = sorted([(str(a[0]).strip(), str(a[1]).strip()) for a in target_authors])
+        target_series_id = self.serie.id
+
+        print(f"\n🔍 FUNNEL: '{self.work.title}' ({target_count} Autoren)")
+
+        # 2. Kandidaten-Suche über den Titel
+        candidates = cursor.execute("SELECT id, series_id FROM works WHERE title = ?", (self.work.title,)).fetchall()
+
+        for w_id, db_series_id in candidates:
+            # Autoren aus DB für diesen Kandidaten laden
+            db_authors_raw = cursor.execute("""
+                SELECT a.firstname, a.lastname FROM work_to_author wta 
+                JOIN authors a ON wta.author_id = a.id 
+                WHERE wta.work_id = ?
+            """, (w_id,)).fetchall()
+
+            db_authors_sorted = sorted([(str(a[0]).strip(), str(a[1]).strip()) for a in db_authors_raw])
+            db_count = len(db_authors_sorted)
+
+            print(f"   -> ID {w_id}: {db_count} Autoren in DB")
+
+            # FALL A: Perfekter Match (Anzahl + Namen + Serie)
+            if db_count == target_count and db_authors_sorted == target_names_sorted:
+                if db_series_id == target_series_id:
+                    print(f"      ✅ MATCH: Werk {w_id} passt.")
+                    self._update_work_defensive(cursor, w_id)
+                    return w_id
+
+            # FALL B: Datenmüll-Erkennung (Heilungsprozess)
+            # Wenn das Werk mehr als einen Autor hat, das Buch aber nur einen (Sammelbecken-Effekt)
+            if db_count > 1 and target_count == 1:
+                print(f"      🗑️ LÖSCHE DATENMÜLL: Werk {w_id} hat {db_count} Autoren.")
+                cursor.execute("DELETE FROM work_to_author WHERE work_id = ?", (w_id,))
+                cursor.execute("DELETE FROM works WHERE id = ?", (w_id,))
+
+        # 3. Kein Match gefunden (oder alter Müll gelöscht) -> Neu anlegen
+        new_id = self._insert_work(cursor)
+        print(f"   ✨ NEUES WERK {new_id} angelegt.")
+        return new_id
+
+    def _update_work_defensive(self, cursor, work_id):
+        """Synchronisiert Buch-Daten (Serie) zum Werk, ohne Vorhandenes zu überschreiben."""
+        if self.book.series_index:
+            try:
+                s_num = float(str(self.book.series_index).replace(',', '.'))
+                self.work.series_index = s_num
+            except (ValueError, TypeError):
+                self.work.series_index = 0.0
+
+        w_dict = {k: v for k, v in asdict(self.work).items() if not isinstance(v, (list, dict, set)) and k != 'id'}
+
+        for col, val in w_dict.items():
+            if val is not None and val != '' and val != 0.0:
+                # Nur updaten, wenn DB-Feld leer oder 0 ist
+                sql = f"UPDATE works SET {col} = CASE WHEN {col} IS NULL OR {col} = '' OR {col} = 0.0 THEN ? ELSE {col} END WHERE id = ?"
+                cursor.execute(sql, (val, work_id))
+
+    def _insert_work(self, cursor) -> int:
+        """Erzeugt ein neues Werk-Atom in der DB."""
+        w_dict = {k: v for k, v in asdict(self.work).items() if not isinstance(v, (list, dict, set)) and k != 'id'}
+        w_dict['slug'] = slugify(self.work.title)
+
+        cols = ", ".join(w_dict.keys())
+        placeholders = ", ".join(["?"] * len(w_dict))
+        cursor.execute(f"INSERT INTO works ({cols}) VALUES ({placeholders})", list(w_dict.values()))
+        return cursor.lastrowid
+
+    def _save_book_raw(self, cursor) -> int:
+        """Speichert die Buch-Metadaten."""
+        # Wir filtern die 'id' aus dem Dictionary für den INSERT-Fall heraus,
+        # damit SQLite AUTOINCREMENT nutzen kann.
+        b_dict = {k: v for k, v in asdict(self.book).items()
+                  if k != 'authors' and not isinstance(v, (set, list))}
+
+        b_dict['keywords'] = ",".join(self.book.keywords)
+        b_dict['regions'] = ",".join(self.book.regions)
+
+        if self.book.id is not None and self.book.id > 0:
+            # UPDATE-Logik
+            cols = [f"{k} = ?" for k in b_dict.keys() if k != 'id']
+            vals = [v for k, v in b_dict.items() if k != 'id']
+            cursor.execute(f"UPDATE books SET {', '.join(cols)} WHERE id = ?", (*vals, self.book.id))
+            return self.book.id
+        else:
+            # INSERT-Logik: ID komplett weglassen!
+            if 'id' in b_dict: del b_dict['id']
+            cols = ", ".join(b_dict.keys())
+            placeholders = ", ".join(["?"] * len(b_dict))
+            cursor.execute(f"INSERT INTO books ({cols}) VALUES ({placeholders})", list(b_dict.values()))
+            self.book.id = cursor.lastrowid  # Neue ID zurückschreiben
+            return self.book.id
+
     def save(self) -> bool:
-        conn = sqlite3.connect(DB_PATH);
+        conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         try:
             # 1. Serie
-            if self.serie.name:
-                self.serie.slug = slugify(self.serie.name)
+            self.serie.id = self._save_serie(cursor)
 
-                # ID-Validierung: Passt der Name noch zur ID?
-                res = cursor.execute("SELECT id FROM series WHERE name = ?", (self.serie.name,)).fetchone()
-                if res:
-                    self.serie.id = res[0]
-                else:
-                    self.serie.id = None
+            # Synchronisation: Genre vom Buch zum Werk übertragen
+            if self.serie.id:
+                self.work.series_id = self.serie.id
+            if self.book.genre:
+                self.work.genre = self.book.genre
+            elif self.book.genre and self.work.genre != self.book.genre:
+                # Optional: Überschreiben, wenn das Buch-Genre aktueller ist
+                self.work.genre = self.book.genre
 
-                    # s_dict erstellen: Wir nehmen ALLES außer der ID
-                s_dict = {k: v for k, v in asdict(self.serie).items() if k != 'id'}
+            # 2. Werk-Heilung (Nutzt jetzt die konsolidierte Logik)
+            valid_work_id = self._find_or_create_work(cursor)
+            self.work.id = valid_work_id
 
-                if self.serie.id:
-                    # Hier der Fix: Wir nutzen COALESCE nur für Werte, die im s_dict wirklich leer/None sind.
-                    # Wenn du aber etwas in die Form eingetragen hast, muss das ? diesen Wert binden.
-                    cols = []
-                    values = []
-                    for k, v in s_dict.items():
-                        # Wenn der neue Wert v existiert (nicht None/leer), direkt setzen.
-                        # Wenn v leer ist, COALESCE nutzen, um den alten DB-Stand zu retten.
-                        if v and str(v).strip():
-                            cols.append(f"{k} = ?")
-                            values.append(v)
-                        else:
-                            # Feld ist leer in der UI -> DB Wert behalten
-                            cols.append(f"{k} = COALESCE({k}, '')")
+            # 3. Buch speichern
+            self.book.work_id = self.work.id
+            self._save_book_raw(cursor)
 
-                    if cols:
-                        sql = f"UPDATE series SET {', '.join(cols)} WHERE id = ?"
-                        cursor.execute(sql, (*values, self.serie.id))
-                else:
-                    # Komplett neuer Insert
-                    cursor.execute(
-                        f"INSERT INTO series ({', '.join(s_dict.keys())}) VALUES ({', '.join(['?'] * len(s_dict))})",
-                        tuple(s_dict.values()))
-                    self.serie.id = cursor.lastrowid
-
-            # 2. Werk
-            if self.work.title:
-                self.work.series_id = self.serie.id if self.serie.id else None
-                self.work.slug = slugify(self.work.title)
-
-                # Check: Passt die ID zum Titel?
-                res = cursor.execute("SELECT id FROM works WHERE title = ?", (self.work.title,)).fetchone()
-                if res:
-                    self.work.id = res[0]
-                else:
-                    self.work.id = None  # Neues Werk!
-
-                w_dict = {k: v for k, v in asdict(self.work).items() if
-                          not isinstance(v, (list, dict, set)) and k != 'id'}
-                w_dict['keywords'] = ",".join(sorted(str(k) for k in self.work.keywords))
-                w_dict['regions'] = ",".join(sorted(str(r) for r in self.work.regions))
-
-                if self.work.id:
-                    sql = f"UPDATE works SET {', '.join([f'{k}=COALESCE(NULLIF(?,\"\"), {k})' for k in w_dict.keys()])} WHERE id=?"
-                    cursor.execute(sql, (*w_dict.values(), self.work.id))
-                else:
-                    # BEVOR wir ein ganz neues Werk anlegen:
-                    # Datenmigration von verbundenen Büchern (optional, falls gewünscht)
-                    cursor.execute(
-                        f"INSERT INTO works ({', '.join(w_dict.keys())}) VALUES ({', '.join(['?'] * len(w_dict))})",
-                        tuple(w_dict.values()))
-                    self.work.id = cursor.lastrowid
-
-            # 3. Buch
-            if self.book.path:
-                self.book.work_id = self.work.id
-                # Nur einfache Typen für die DB-Abfrage (keine Listen/Sets)
-                b_dict = {k: v for k, v in asdict(self.book).items() if
-                          not isinstance(v, (list, dict, set)) and k != 'id'}
-                # Sets manuell hinzufügen als String
-                b_dict['keywords'] = ",".join(self.book.keywords) if self.book.keywords else ""
-                b_dict['regions'] = ",".join(self.book.regions) if self.book.regions else ""
-
-                if self.book.id:
-                    cursor.execute(f"UPDATE books SET {', '.join([f'{k}=?' for k in b_dict.keys()])} WHERE id=?",
-                                   (*b_dict.values(), self.book.id))
-                else:
-                    cursor.execute(
-                        f"INSERT INTO books ({', '.join(b_dict.keys())}) VALUES ({', '.join(['?'] * len(b_dict))})",
-                        tuple(b_dict.values()))
-                    self.book.id = cursor.lastrowid
-
-            # 4. Autoren
-            if self.work.id and self.book.authors:
+            # 4. Autoren-Links finalisieren
+            if self.book.authors:
                 self.reset_authors(self.book.authors, self.work.id, cursor)
 
-            conn.commit();
-            self.capture_db_state();
+            conn.commit()
+            # Nach dem Speichern den Snapshot aktualisieren, damit is_dirty False wird
+            self.capture_db_state()
             return True
         except Exception as e:
-            print(f"❌ Save Error: {e}");
-            conn.rollback();
+            print(f"❌ Save Error: {e}")
+            conn.rollback()
             return False
         finally:
             conn.close()
+
+    def _save_serie(self, cursor) -> int:
+        # 1. Namen synchronisieren: Falls nur im Buch eingetragen, ins Serie-Atom schieben
+        if not self.serie.name and self.book.series_name:
+            self.serie.name = self.book.series_name
+
+        if not self.serie.name:
+            return 0
+
+        self.serie.slug = slugify(self.serie.name)
+        res = cursor.execute("SELECT id FROM series WHERE name = ?", (self.serie.name,)).fetchone()
+        s_id = res[0] if res else None
+
+        s_dict = {k: v for k, v in asdict(self.serie).items() if k != 'id'}
+        if s_id:
+            cols = [f"{k} = ?" for k in s_dict.keys()]
+            cursor.execute(f"UPDATE series SET {', '.join(cols)} WHERE id = ?", (*s_dict.values(), s_id))
+        else:
+            cursor.execute(f"INSERT INTO series ({', '.join(s_dict.keys())}) VALUES ({', '.join(['?'] * len(s_dict))})",
+                           tuple(s_dict.values()))
+            s_id = cursor.lastrowid
+        return s_id
+
+
 
     # ----------------------------------------------------------------------
     # V. DELETE
@@ -775,6 +818,75 @@ class BookData:
         if not self.book.id: return False
         conn = sqlite3.connect(DB_PATH)
         conn.execute("DELETE FROM books WHERE id = ?", (self.book.id,))
-        conn.commit();
-        conn.close();
+        conn.commit()
+        conn.close()
         return True
+
+    @staticmethod
+    def fix_corrupted_book(book_id, correct_author_id):
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        try:
+            # SQL angepasst: series_index statt series_number
+            cursor.execute("SELECT title, series_name, series_index FROM books WHERE id = ?", (book_id,))
+            b = cursor.fetchone()
+            if not b: return
+            b_title, s_name, s_idx = b
+
+            new_slug = slugify(b_title)
+            cursor.execute("""
+                INSERT INTO works (title, slug, series_index) 
+                VALUES (?, ?, ?)
+            """, (b_title, new_slug, s_idx or 0.0))  # s_idx ist jetzt bereits float aus der DB
+            new_work_id = cursor.lastrowid
+
+            cursor.execute("UPDATE books SET work_id = ? WHERE id = ?", (new_work_id, book_id))
+            cursor.execute("INSERT OR IGNORE INTO work_to_author (work_id, author_id) VALUES (?, ?)",
+                           (new_work_id, correct_author_id))
+
+            conn.commit()
+        finally:
+            conn.close()
+
+
+    def get_work_conflicts(self):
+        """
+        Prüft, ob das aktuell zugeordnete Werk Autoren hat,die nicht zu den Autoren dieses Buches passen.
+        """
+        if not self.book.work_id or self.book.work_id == 0:
+            return []
+
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        # Suche alle Autoren, die mit diesem Werk verknüpft sind,
+        # aber nicht der aktuelle Autor dieses Buches sind.
+        query = """
+            SELECT DISTINCT a.firstname, a.lastname, b.title, b.path
+            FROM work_to_author wta
+            JOIN authors a ON wta.author_id = a.id
+            LEFT JOIN books b ON b.work_id = wta.work_id
+            WHERE wta.work_id = ? AND b.id != ?
+        """
+        cursor.execute(query, (self.book.work_id, self.book.id))
+        rows = cursor.fetchall()
+        conn.close()
+
+        # Abgleich mit den Autoren im aktuellen Manager-Objekt (Formular-Stand)
+        current_author_names = [f"{a[0]} {a[1]}".lower().strip() for a in self.book.authors]
+
+        conflicts = []
+        for row in rows:
+            db_author = f"{row['firstname']} {row['lastname']}".lower().strip()
+            if db_author not in current_author_names:
+                conflicts.append({
+                    'author': f"{row['firstname']} {row['lastname']}",
+                    'title': row['title'],
+                    'path': row['path']
+                })
+        return conflicts
+
+
+if __name__ == "__main__":
+    book = BookData

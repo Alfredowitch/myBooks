@@ -1,6 +1,5 @@
 import os
 import re
-import sqlite3
 import unicodedata
 from typing import Optional, List, Dict
 
@@ -8,7 +7,7 @@ from typing import Optional, List, Dict
 from Zoom.scan_file import extract_info_from_filename, derive_metadata_from_path
 from Zoom.scan_epub import get_epub_metadata
 from Zoom.scan_check import check_for_mismatch
-from Zoom.utils import sanitize_path, DB_PATH
+from Zoom.utils import sanitize_path
 
 # --- API Tools (Refactored V1.5) ---
 from Zoom.scan_google_books import get_google_data
@@ -26,36 +25,47 @@ class Scanner:
 
     @classmethod
     def scan_single_book(cls, file_path: str, force_update: bool = False) -> Optional[BookData]:
-        """
-        Zentrale Methode: Analysiert eine Datei und befüllt das BookData-Aggregat.
-        """
         if not os.path.exists(file_path):
             return None
 
         file_path = sanitize_path(file_path)
 
-        # --- SCHRITT A: DB CHECK & Initialisierung ---
-        # Versuche existierende Daten zu laden (lädt book, work, serie Atome)
-        manager = BookData.load_by_path(file_path)
+        # --- SCHRITT A: DB CHECK ---
+        # Korrektur: Nutze die neue statische Methode load_db_by_path
+        manager = BookData.load_db_by_path(file_path)
 
         if not manager:
             manager = BookData()
             manager.book.path = file_path
+            manager.is_in_db = False  # Wichtig für die UI-Farben später
+        else:
+            manager.is_in_db = True
+            manager.capture_db_state()
 
         db_version = manager.book.scanner_version or "NEU"
         is_current = (str(db_version) == str(cls.CURRENT_SCANNER_VERSION))
 
-        # Überspringen, wenn Version aktuell und kein Force-Update
+        # Wenn aktuell und kein Force-Update: Finger weg.
         if manager.is_in_db and manager.book.is_complete and is_current and not force_update:
             return manager
 
         manager.book.scanner_version = cls.CURRENT_SCANNER_VERSION
 
-        # --- SCHRITT B: DATEI & PFAD ANALYSE (HÖCHSTE PRIORITÄT)---
+        # --- SCHRITT B: DATEI & PFAD ANALYSE ---
+        # Hier ziehen wir die "Wahrheit" aus dem Dateisystem
         file_info = extract_info_from_filename(file_path)
         manager.book.merge_with(file_info)
 
         path_info = derive_metadata_from_path(file_path)
+        manager.book.merge_with(path_info)
+
+        # WICHTIG: Serie und Index explizit setzen, damit der Funnel in manager.save()
+        # später das richtige Werk findet oder trennt.
+        if file_info.get('series_name'):
+            manager.book.series_name = file_info['series_name']
+        if file_info.get('series_index'):
+            manager.book.series_index = file_info['series_index']
+
         print(f"\n--- 🧩 MERGE START: {path_info.get('title', 'Unbekannt')} ---")
         print(f"DEBUG: Eingehende Daten (path_info): {path_info}")
         manager.book.merge_with(path_info)
@@ -128,6 +138,21 @@ class Scanner:
         if r_set:
             manager.book.regions.update(r_set)
 
+        # --- SCHRITT F: KONFLIKTPRÜFUNG (Neu) ---
+        conflicts = manager.get_work_conflicts()
+        if conflicts:
+            print(f"⚠️ Konflikt erkannt für ID {manager.book.id}: Buch gehört zu anderen Autoren in DB.")
+            # Option A: In den Report schreiben
+            cls.mismatch_list.append({
+                'book_id': manager.book.id,
+                'file_path': manager.book.path,
+                'note': f"Konflikt mit Werk-Autoren: {conflicts[0]['author']}",
+                'action': 'WORK_SPLIT'
+            })
+            # Option B: Sofort heilen (Indem wir die work_id nullen,
+            # erzwingt manager.save() eine Neusuche/Erstellung)
+            manager.book.work_id = 0
+
         # --- SCHRITT G: DATEINAMEN OPTIMIERUNG ---
         print("DEBUG: Neuer Filename")
         new_filename = cls.build_perfect_filename(manager)
@@ -156,74 +181,37 @@ class Scanner:
 
     @classmethod
     def run_smart_scan(cls, base_path: str, force_update: bool = False):
-        """
-        Scannt ein Verzeichnis unabhängig vom Browser.
-        Robust gegenüber Speicherfehlern mit manueller Interaktionsmöglichkeit.
-        """
         from tqdm import tqdm
         cls.mismatch_list = []
         stats = {"sync": 0, "new": 0, "errors": 0}
 
-        # 1. Dateiliste vorbereiten
         all_files = []
         for root, _, files in os.walk(base_path):
             all_files.extend([os.path.join(root, f) for f in files
                               if f.lower().endswith(('.epub', '.pdf', '.mobi', '.azw3'))])
 
-        if not all_files:
-            print(f"ℹ️ Keine unterstützten Buchformate in {base_path} gefunden.")
-            return stats
+        print(f"🚀 Starte Smart-Scan in: {base_path}")
 
-        print(f"🚀 Starte Smart-Scan für {len(all_files)} Dateien...")
-
-        # 2. Iteration mit Fortschrittsbalken
-        for full_path in tqdm(all_files, desc="Verarbeite Bücher", unit="file"):
+        for full_path in tqdm(all_files, desc="Scan läuft", unit="file"):
             full_path = sanitize_path(full_path)
 
-            # Vorab-Check um Last zu sparen
-            if not force_update and cls.is_already_in_db(full_path):
-                continue
-
             try:
+                # Nutzt jetzt die verschärfte Logik
                 manager = cls.scan_single_book(full_path, force_update=force_update)
-                if not manager:
-                    continue
+                if not manager: continue
 
-                is_new = (manager.book.id == 0)
+                is_new = not manager.is_in_db
 
-                # 3. Speicher-Versuch mit Fehler-Handling
+                # In manager.save() greift jetzt dein neuer Funnel!
                 if manager.save():
-                    if is_new:
-                        stats["new"] += 1
-                    else:
-                        stats["sync"] += 1
+                    stats["new" if is_new else "sync"] += 1
                 else:
-                    # Fehlermeldung und Weiche für den User
-                    print(f"\n❌ SPEICHERFEHLER: {os.path.basename(full_path)}")
-                    print(f"   Pfad: {full_path}")
-
-                    choice = input(
-                        "Fehler beim Speichern in DB. (i)gnorieren, (a)bbrechen oder (d)etails? [i/a/d]: ").lower()
-
-                    if choice == 'd':
-                        # Debug-Info ausgeben (Attribute des Managers prüfen)
-                        print(f"--- DEBUG INFO ---")
-                        print(f"Book-ID: {manager.book.id}, Title: {manager.book.title}")
-                        print(f"Authors: {manager.book.authors}")
-                        input("Drücke Enter zum Fortfahren...")
-                    elif choice == 'a':
-                        print("Scan durch Benutzer abgebrochen.")
-                        return stats
-
                     stats["errors"] += 1
-
             except Exception as e:
-                print(f"\n💥 KRITISCHER FEHLER bei {os.path.basename(full_path)}:")
-                print(f"   Typ: {type(e).__name__} | Nachricht: {e}")
-
-                if input("Weiter machen? (y/n): ").lower() != 'y':
-                    return stats
+                print(f"💥 Fehler bei {os.path.basename(full_path)}: {e}")
                 stats["errors"] += 1
+
+        cls.write_mismatch_report(base_path)
 
         print(f"\n✅ Scan beendet: {stats['new']} neu, {stats['sync']} synchronisiert, {stats['errors']} Fehler.")
         return stats
@@ -245,14 +233,15 @@ class Scanner:
 
         # 2. Serien Teil
         series_part = ""
+        idx_val = getattr(b, 'series_index', 0.0)
         if b.series_name:
-            # Index formatieren (z.B. "01")
             try:
-                idx = float(b.series_number)
+                idx = float(idx_val)
+                # Formatierung: 01 für Ganzzahlen, 01.5 für Zwischenbände
                 num = f"{int(idx):02d}" if idx.is_integer() else f"{idx:04.1f}"
             except (ValueError, TypeError):
-                num = str(b.series_number)
-            series_part = f"{b.series_name} {num}-"
+                num = "00"
+            series_part = f"{b.series_name} {num} - "
 
         # 3. Jahr & Titel
         year_val = 0
@@ -276,7 +265,8 @@ class Scanner:
             if not b.ext:
                 b.ext = ".epub"  # Vernünftiger Default
         ext = b.ext if b.ext.startswith('.') else f".{b.ext}"
-        filename = f"{auth_str} {EM_DASH} {series_part}{clean_title}{year_part}{ext}"
+        # filename = f"{auth_str} {EM_DASH} {series_part}{clean_title}{year_part}{ext}"
+        filename = f"{auth_str} {EM_DASH} {series_part}{clean_title}{ext}"
 
         # 5. OS-Spezifische Reinigung
         clean_name = re.sub(r'[:?*<>|"/\\\r\n]', '', filename)
@@ -289,3 +279,51 @@ class Scanner:
             return sanitize_path(os.path.join(directory, perfect_name))
 
         return perfect_name
+
+    @classmethod
+    def write_mismatch_report(cls, base_path):
+        """Schreibt Mismatches und Funnel-Entscheidungen in eine Textdatei."""
+        if not cls.mismatch_list:
+            print("Keine Mismatches gefunden. Kein Report erstellt.")
+            return
+
+        report_path = sanitize_path(os.path.join(base_path, 'Metadaten_Report_V1.5.txt'))
+        try:
+            with open(report_path, 'w', encoding="utf-8") as f:
+                f.write(f"--- 📊 METADATEN & FUNNEL REPORT ({len(cls.mismatch_list)} Einträge) ---\n")
+                f.write(f"Version: {cls.CURRENT_SCANNER_VERSION}\n\n")
+
+                for item in cls.mismatch_list:
+                    # Identifikation
+                    b_id = item.get('book_id', 'NEU')
+                    f.write(f"📗 BUCH-ID: {b_id}\n")
+                    f.write(f"   Pfad: {item.get('file_path', 'N/A')}\n")
+
+                    # Mismatch-Details (Titel/Autor Konflikte aus EPUB-Check)
+                    if 'file_title' in item:
+                        f.write(f"   ❌ TITEL-KONFLIKT: '{item['file_title']}' (Datei) vs. '{item['epub_title']}' (EPUB)\n")
+
+                    if 'file_authors' in item:
+                        # Formatierung der Autoren-Tupel für den Report
+                        f_auth = " & ".join([f"{v} {n}".strip() for v, n in item['file_authors']])
+                        e_auth = " & ".join([f"{v} {n}".strip() for v, n in item['epub_authors']])
+                        f.write(f"   ❌ AUTOR-KONFLIKT: {f_auth} (Datei) vs. {e_auth} (EPUB)\n")
+
+                    # Funnel-Informationen (Wichtig für deine 6.874 Fälle!)
+                    if 'note' in item:
+                        f.write(f"   ℹ️ INFO/NOTE: {item['note']}\n")
+
+                    if 'action' in item:
+                        f.write(f"   ⚡ AKTION: {item['action']}\n")
+
+                    f.write("-" * 50 + "\n")
+            print(f"✅ Report unter {report_path} gespeichert.")
+        except Exception as e:
+            print(f"❌ Fehler beim Schreiben des Reports: {e}")
+
+
+if __name__ == "__main__":
+    target_path = sanitize_path(r"D:\Bücher\Deutsch\_byGenre\SF\K.H. Scheer")
+    # Scanner instanziieren
+    scanner = Scanner()
+    scanner.run_smart_scan(base_path=target_path)

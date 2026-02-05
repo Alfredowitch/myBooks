@@ -1,10 +1,10 @@
 import sqlite3
 from typing import Optional
-from Zoom.utils import normalize_text, DB2_PATH
+from Zoom.utils import normalize_text, DB_PATH
 
 
 class WorkManager:
-    def __init__(self, db_path: str = DB2_PATH):
+    def __init__(self, db_path: str = DB_PATH):
         self.db_path = db_path
 
     def _get_conn(self):

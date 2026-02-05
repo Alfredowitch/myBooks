@@ -104,10 +104,11 @@ class BrowserView:
         self._add_mini_field(f_w_row3, "Regions:", "w_regions", 0, 2, width=20, readonly=True)
 
         f_w_row4 = tk.Frame(self.f_work, bg=self.colors['work'])
-        f_w_row4.grid(row=4, column=1, sticky="ew", pady=2)
+        f_w_row4.grid(row=5, column=1, sticky="ew", pady=2)
         self._add_mini_field(f_w_row4, "Genre:", "w_genre", 0, 0, width=30, readonly=True)
         self._add_mini_field(f_w_row4, "Rating:", "w_rating", 0, 2, width=10, readonly=True)
         self._add_mini_field(f_w_row4, "Stars:", "w_stars", 0, 4, width=10, readonly=True)
+        self._add_mini_field(f_w_row4, "Serien-Index (Master):", "w_series_index", 0, 0, width=10, readonly=True)
 
         # --- BUCH ---
         self.f_book = tk.LabelFrame(left_panel, text=" BUCH-DETAILS (Leading) ", bg=self.colors['book'], font=self.font_title, padx=10, pady=10)
@@ -121,7 +122,7 @@ class BrowserView:
         f_b_row2 = tk.Frame(self.f_book, bg=self.colors['book'])
         f_b_row2.grid(row=2, column=1, sticky="ew", pady=2)
         self._add_mini_field(f_b_row2, "Serie:", "b_series_name", 0, 0, width=40)
-        self._add_mini_field(f_b_row2, "Nr:", "b_series_number", 0, 2, width=5)
+        self._add_mini_field(f_b_row2, "Nr:", "b_series_index", 0, 2, width=5)
         self._add_mini_field(f_b_row2, "Sprache:", "b_language", 0, 4, width=10)
         self._add_mini_field(f_b_row2, "Jahr:", "b_year", 0, 6, width=8)
 
@@ -305,6 +306,11 @@ class BrowserView:
         if hasattr(data, 'work') and data.work:
             w = data.work
             self._set_val('w_description', getattr(w, 'description', ""))
+            # Anzeige des Master-Index aus dem Werk
+            w_idx = getattr(w, 'series_index', 0.0)
+            # Formatierung: 1.0 -> "1", 1.5 -> "1.5"
+            display_w_idx = str(int(w_idx)) if w_idx == int(w_idx) else str(w_idx)
+            self._set_val('w_series_index', display_w_idx)
             self._set_val('w_genre', getattr(w, 'genre', ""))
             self._set_val('w_rating', getattr(w, 'rating', ""))
             self._set_val('w_stars', getattr(w, 'stars', ""))
@@ -325,7 +331,10 @@ class BrowserView:
             b = data.book
             self._set_val('b_title', getattr(b, 'title', ""))
             self._set_val('b_series_name', getattr(b, 'series_name', ""))
-            self._set_val('b_series_number', getattr(b, 'series_number', ""))
+            # Schöne Formatierung: 1.0 -> "1", 1.5 -> "1.5"
+            idx = getattr(b, 'series_index', 0.0)
+            display_idx = str(int(idx)) if idx == int(idx) else str(idx)
+            self._set_val('b_series_index', display_idx)
             self._set_val('b_isbn', getattr(b, 'isbn', ""))
             self._set_val('b_genre', getattr(b, 'genre', ""))
             self._set_val('b_regions', getattr(b, 'regions', ""))
@@ -418,7 +427,14 @@ class BrowserView:
             b = data.book
             b.title = self.widgets['b_title'].get().strip()
             b.series_name = self.widgets['b_series_name'].get().strip()
-            b.series_number = self.widgets['b_series_number'].get().strip()
+            # --- TYPSICHERE KONVERTIERUNG DES INDEX ---
+            raw_idx = self.widgets['b_series_index'].get().replace(',', '.').strip()
+            try:
+                b.series_index = float(raw_idx) if raw_idx else 0.0
+            except ValueError:
+                b.series_index = 0.0
+            if data.work:
+                data.work.series_index = b.series_index
             b.isbn = self.widgets['b_isbn'].get().strip()
             b.genre = self.widgets['b_genre'].get().strip()
             b.regions = self.widgets['b_regions'].get().strip()
